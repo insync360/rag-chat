@@ -12,6 +12,10 @@ class Settings:
     LLAMAPARSE_MODEL: str = "anthropic-sonnet-4.0"
     LLAMAPARSE_RESULT_TYPE: str = "markdown"
 
+    OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
+    ENRICHMENT_MODEL: str = "gpt-4o-mini"
+    ENRICHMENT_CONCURRENCY: int = 5
+
     SUPPORTED_FILE_TYPES: set[str] = {".pdf", ".docx", ".pptx", ".txt", ".md", ".html"}
     MAX_FILE_SIZE_MB: int = 50
     PARSE_TIMEOUT_SECONDS: int = 300  # 5 minutes
