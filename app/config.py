@@ -17,5 +17,9 @@ class Settings:
     PARSE_TIMEOUT_SECONDS: int = 300  # 5 minutes
     PARSE_MAX_RETRIES: int = 3
 
+    CHUNK_MIN_TOKENS: int = 256
+    CHUNK_MAX_TOKENS: int = 512
+    CHUNK_OVERLAP_PERCENT: float = 0.12  # 12% overlap
+
 
 settings = Settings()
