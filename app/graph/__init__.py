@@ -38,6 +38,7 @@ async def extract_and_store_graph(
     *,
     old_document_id: str | None = None,
     changed_indices: set[int] | None = None,
+    run_community_detection: bool = False,
 ) -> GraphExtractionResult:
     """Extract entities/relationships from chunks and store in Neo4j.
 
@@ -120,6 +121,13 @@ async def extract_and_store_graph(
             await clear_document_graph(doc_record.id)
 
         await store_graph(entities, relationships, doc_record.id)
+
+        if run_community_detection:
+            try:
+                from app.graph.community import detect_communities
+                await detect_communities()
+            except Exception as exc:
+                logger.warning("Community detection failed: %s", exc)
 
         return GraphExtractionResult(
             entities=entities,

@@ -44,5 +44,12 @@ class Settings:
     ENTITY_EMBEDDING_MODEL: str = "text-embedding-3-large"
     ENTITY_EMBEDDING_DIMENSIONS: int = 256      # reduced dims — entity names are short
 
+    # Community detection
+    COMMUNITY_DETECTION_ENABLED: bool = True
+    COMMUNITY_SUMMARY_ENABLED: bool = True
+    COMMUNITY_SUMMARY_MODEL: str = "gpt-4o-mini"
+    COMMUNITY_MIN_SIZE: int = 2          # skip singletons for summaries
+    COMMUNITY_RESOLUTION: float = 1.0   # Leiden resolution (higher = more communities)
+
 
 settings = Settings()

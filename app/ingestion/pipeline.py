@@ -262,6 +262,17 @@ async def ingest_files(file_paths: list[str | Path]) -> PipelineResult:
         result = await _ingest_one(fp, parser, tracker, pool)
         files.append(result)
 
+    # Post-batch community detection (once for entire batch)
+    if any(f.status == PipelineStatus.COMPLETED for f in files):
+        try:
+            from app.graph.community import detect_communities
+            t = time.perf_counter()
+            await detect_communities()
+            community_ms = _ms_since(t)
+            logger.info("Community detection completed in %.1fms", community_ms)
+        except Exception as exc:
+            logger.warning("Post-batch community detection failed: %s", exc)
+
     total_ms = _ms_since(start)
     return PipelineResult(
         total=len(files),

@@ -32,3 +32,22 @@ class GraphExtractionResult:
     relationship_count: int
     skipped: bool = False
     error: str | None = None
+
+
+@dataclass
+class CommunityInfo:
+    community_id: int
+    entity_names: list[str]
+    entity_types: list[str]
+    relationship_types: list[str]
+    size: int
+    summary: str | None = None
+
+
+@dataclass
+class CommunityDetectionResult:
+    communities: list[CommunityInfo]
+    total_entities: int
+    total_communities: int
+    skipped: bool = False
+    error: str | None = None

@@ -7,3 +7,5 @@ neo4j
 spacy>=3.5
 coreferee
 rapidfuzz
+python-igraph>=0.11
+leidenalg>=0.10

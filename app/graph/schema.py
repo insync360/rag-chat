@@ -13,6 +13,9 @@ _SCHEMA_STATEMENTS = [
     "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.type)",
     "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
     "CREATE INDEX entity_status IF NOT EXISTS FOR (e:Entity) ON (e.status)",
+    "CREATE INDEX entity_community IF NOT EXISTS FOR (e:Entity) ON (e.community_id)",
+    "CREATE CONSTRAINT community_unique IF NOT EXISTS "
+    "FOR (c:Community) REQUIRE c.community_id IS UNIQUE",
 ]
 
 # Migration: convert old source_document_id → source_document_ids array
