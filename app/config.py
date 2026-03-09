@@ -35,6 +35,7 @@ class Settings:
     GRAPH_EXTRACTION_CONCURRENCY: int = 3
     GRAPH_EXTRACTION_ENABLED: bool = True
     GRAPH_BATCH_SIZE: int = 100
+    COREF_ENABLED: bool = True
 
 
 settings = Settings()

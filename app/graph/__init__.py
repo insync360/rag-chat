@@ -3,6 +3,7 @@
 import logging
 
 from app.config import settings
+from app.graph.coref import resolve_coreferences
 from app.graph.dedup import deduplicate_entities, deduplicate_relationships
 from app.graph.extractor import extract_from_chunks
 from app.graph.models import GraphExtractionResult
@@ -29,7 +30,16 @@ async def extract_and_store_graph(
         )
 
     try:
-        entities, relationships = await extract_from_chunks(chunks, doc_record.id)
+        resolved_texts = None
+        if settings.COREF_ENABLED:
+            try:
+                resolved_texts = await resolve_coreferences(chunks)
+            except Exception as exc:
+                logger.warning("Coref failed, using originals: %s", exc)
+
+        entities, relationships = await extract_from_chunks(
+            chunks, doc_record.id, resolved_texts,
+        )
 
         entities = deduplicate_entities(entities)
         relationships = deduplicate_relationships(relationships, entities)

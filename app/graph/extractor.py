@@ -46,6 +46,7 @@ async def _extract_single(
     chunk: Chunk,
     document_id: str,
     semaphore: asyncio.Semaphore,
+    resolved_text: str | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from a single chunk. Never raises."""
     if _token_count(chunk.content) < 10:
@@ -60,7 +61,7 @@ async def _extract_single(
             try:
                 resp = await client.chat.completions.create(
                     model=settings.GRAPH_EXTRACTION_MODEL,
-                    messages=_build_messages(chunk.content),
+                    messages=_build_messages(resolved_text or chunk.content),
                     response_format={"type": "json_object"},
                     temperature=0,
                     max_tokens=2048,
@@ -105,6 +106,7 @@ async def _extract_single(
 
 async def extract_from_chunks(
     chunks: list[Chunk], document_id: str,
+    resolved_texts: list[str] | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from all chunks. Never raises."""
     if not chunks:
@@ -112,10 +114,11 @@ async def extract_from_chunks(
 
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     semaphore = asyncio.Semaphore(settings.GRAPH_EXTRACTION_CONCURRENCY)
+    texts = resolved_texts or [None] * len(chunks)
 
     results = await asyncio.gather(*(
-        _extract_single(client, chunk, document_id, semaphore)
-        for chunk in chunks
+        _extract_single(client, chunk, document_id, semaphore, text)
+        for chunk, text in zip(chunks, texts)
     ))
 
     all_entities: list[Entity] = []
