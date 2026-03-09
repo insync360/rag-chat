@@ -1,5 +1,6 @@
 """Persist entities and relationships to Neo4j."""
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -31,7 +32,7 @@ async def store_graph(
                 "doc_id": e.source_document_id,
                 "chunk_index": e.source_chunk_index,
                 "confidence": e.confidence,
-                "properties": e.properties,
+                "properties": json.dumps(e.properties) if e.properties else "{}",
             }
             for e in batch
         ]
@@ -77,7 +78,7 @@ async def store_graph(
                     "doc_id": r.source_document_id,
                     "chunk_index": r.source_chunk_index,
                     "confidence": r.confidence,
-                    "properties": r.properties,
+                    "properties": json.dumps(r.properties) if r.properties else "{}",
                 }
                 for r in batch
             ]
