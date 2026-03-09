@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 
 from app.database import get_pool
+from app.graph import extract_and_store_graph
 from app.ingestion.chunker import chunk_document, save_chunks
 from app.ingestion.enricher import enrich_chunks
 from app.ingestion.parser import LlamaParser
@@ -33,6 +34,7 @@ class StepTimings:
     version_track_ms: float = 0
     chunk_ms: float = 0
     enrich_ms: float = 0
+    graph_extract_ms: float = 0
     save_ms: float = 0
 
     def to_dict(self) -> dict:
@@ -41,6 +43,7 @@ class StepTimings:
             "version_track_ms": self.version_track_ms,
             "chunk_ms": self.chunk_ms,
             "enrich_ms": self.enrich_ms,
+            "graph_extract_ms": self.graph_extract_ms,
             "save_ms": self.save_ms,
         }.items() if v > 0}
 
@@ -52,6 +55,8 @@ class FileResult:
     document_id: str | None = None
     version: int | None = None
     chunk_count: int | None = None
+    entity_count: int | None = None
+    relationship_count: int | None = None
     error: str | None = None
     step: str | None = None
     timings: StepTimings = field(default_factory=StepTimings)
@@ -158,7 +163,20 @@ async def _ingest_one(
             chunks = await enrich_chunks(chunks, record)
             timings.enrich_ms = _ms_since(t)
 
-            # 5. Save
+            # 5. Graph extract (non-blocking)
+            step = "graph_extract"
+            t = time.perf_counter()
+            try:
+                graph_result = await extract_and_store_graph(chunks, record)
+            except Exception as graph_exc:
+                logger.warning("Graph extraction failed for %s: %s", filename, graph_exc)
+                graph_result = None
+            timings.graph_extract_ms = _ms_since(t)
+
+            entity_count = graph_result.entity_count if graph_result else 0
+            relationship_count = graph_result.relationship_count if graph_result else 0
+
+            # 6. Save
             step = "save"
             t = time.perf_counter()
             chunk_ids = await save_chunks(chunks)
@@ -172,8 +190,10 @@ async def _ingest_one(
             return FileResult(
                 filename=filename, status=PipelineStatus.COMPLETED,
                 document_id=record.id, version=record.version,
-                chunk_count=len(chunk_ids), step="save",
-                timings=timings, log_id=log_id,
+                chunk_count=len(chunk_ids),
+                entity_count=entity_count,
+                relationship_count=relationship_count,
+                step="save", timings=timings, log_id=log_id,
             )
 
         except Exception as exc:

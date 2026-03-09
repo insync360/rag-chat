@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.graph.models import GraphExtractionResult
 from app.ingestion.chunker import Chunk
 from app.ingestion.parser import ParsedDocument
 from app.ingestion.pipeline import (
@@ -70,11 +71,17 @@ def deps():
     chunk_ids = [str(uuid.uuid4()) for _ in ch]
     pool = _mock_pool()
 
+    graph_result = GraphExtractionResult(
+        entities=[], relationships=[],
+        entity_count=0, relationship_count=0, skipped=True,
+    )
+
     patches = {
         "parser": patch("app.ingestion.pipeline.LlamaParser"),
         "tracker": patch("app.ingestion.pipeline.VersionTracker"),
         "chunk_doc": patch("app.ingestion.pipeline.chunk_document", return_value=ch),
         "enrich": patch("app.ingestion.pipeline.enrich_chunks", new_callable=AsyncMock, return_value=ch),
+        "graph": patch("app.ingestion.pipeline.extract_and_store_graph", new_callable=AsyncMock, return_value=graph_result),
         "save": patch("app.ingestion.pipeline.save_chunks", new_callable=AsyncMock, return_value=chunk_ids),
         "get_pool": patch("app.ingestion.pipeline.get_pool", new_callable=AsyncMock, return_value=pool),
         "sleep": patch("asyncio.sleep", new_callable=AsyncMock),

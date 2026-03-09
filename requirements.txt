@@ -3,3 +3,4 @@ python-dotenv
 asyncpg
 openai
 tiktoken
+neo4j

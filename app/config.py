@@ -25,5 +25,16 @@ class Settings:
     CHUNK_MAX_TOKENS: int = 512
     CHUNK_OVERLAP_PERCENT: float = 0.12  # 12% overlap
 
+    # Neo4j
+    NEO4J_URI: str = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USER: str = os.environ.get("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD: str = os.environ.get("NEO4J_PASSWORD", "")
+
+    # Graph extraction
+    GRAPH_EXTRACTION_MODEL: str = "gpt-4o"
+    GRAPH_EXTRACTION_CONCURRENCY: int = 3
+    GRAPH_EXTRACTION_ENABLED: bool = True
+    GRAPH_BATCH_SIZE: int = 100
+
 
 settings = Settings()
