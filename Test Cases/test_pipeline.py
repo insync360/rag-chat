@@ -94,6 +94,7 @@ def deps():
 
     tracker_inst = MagicMock()
     tracker_inst.track = AsyncMock(return_value=(record, True))
+    tracker_inst.get_active = AsyncMock(return_value=None)
     mocks["tracker"].return_value = tracker_inst
 
     yield {

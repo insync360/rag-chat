@@ -6,3 +6,4 @@ tiktoken
 neo4j
 spacy>=3.5
 coreferee
+rapidfuzz

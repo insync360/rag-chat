@@ -79,7 +79,9 @@ async def test_clear_document_graph(mock_driver):
     await clear_document_graph("doc-123")
 
     session.run.assert_called_once()
-    assert "DETACH DELETE" in session.run.call_args[0][0]
+    cypher = session.run.call_args[0][0]
+    assert "deprecated" in cypher
+    assert "DETACH DELETE" not in cypher
 
 
 def test_batching():

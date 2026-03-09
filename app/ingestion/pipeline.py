@@ -10,7 +10,7 @@ from pathlib import Path
 
 from app.database import get_pool
 from app.graph import extract_and_store_graph
-from app.ingestion.chunker import chunk_document, save_chunks
+from app.ingestion.chunker import chunk_document, get_chunk_hashes, save_chunks
 from app.ingestion.enricher import enrich_chunks
 from app.ingestion.parser import LlamaParser
 from app.ingestion.version_tracker import VersionTracker
@@ -124,9 +124,10 @@ async def _ingest_one(
             doc = await parser.parse(file_path)
             timings.parse_ms = _ms_since(t)
 
-            # 2. Version track
+            # 2. Version track — check for prior active version before tracking
             step = "version_track"
             t = time.perf_counter()
+            old_record = await tracker.get_active(doc.filename)
             record, is_new = await tracker.track(doc)
             timings.version_track_ms = _ms_since(t)
 
@@ -157,6 +158,28 @@ async def _ingest_one(
             chunks = chunk_document(doc.full_markdown, record.id)
             timings.chunk_ms = _ms_since(t)
 
+            # 3b. Change detection for incremental graph updates
+            old_document_id = None
+            changed_indices = None
+            if old_record and old_record.id != record.id:
+                try:
+                    old_hashes = await get_chunk_hashes(old_record.id)
+                    changed = {
+                        i for i, c in enumerate(chunks)
+                        if old_hashes.get(i) != c.content_hash
+                    }
+                    new_idx = {
+                        c.chunk_index for c in chunks
+                    } - set(old_hashes.keys())
+                    old_document_id = old_record.id
+                    changed_indices = changed | new_idx
+                    logger.info(
+                        "Change detection for %s: %d changed, %d new out of %d chunks",
+                        filename, len(changed), len(new_idx), len(chunks),
+                    )
+                except Exception as exc:
+                    logger.warning("Change detection failed for %s, full extraction: %s", filename, exc)
+
             # 4. Enrich
             step = "enrich"
             t = time.perf_counter()
@@ -167,7 +190,11 @@ async def _ingest_one(
             step = "graph_extract"
             t = time.perf_counter()
             try:
-                graph_result = await extract_and_store_graph(chunks, record)
+                graph_result = await extract_and_store_graph(
+                    chunks, record,
+                    old_document_id=old_document_id,
+                    changed_indices=changed_indices,
+                )
             except Exception as graph_exc:
                 logger.warning("Graph extraction failed for %s: %s", filename, graph_exc)
                 graph_result = None

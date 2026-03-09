@@ -4,6 +4,7 @@ Respects heading boundaries, table/code block integrity, and paragraph coherence
 Three phases: parse blocks → group into chunks → apply overlap.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -54,6 +55,7 @@ class Chunk:
     has_code: bool
     overlap_tokens: int
     metadata: dict = field(default_factory=dict)
+    content_hash: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +314,8 @@ def chunk_document(full_markdown: str, document_id: str) -> list[Chunk]:
     blocks = _parse_blocks(full_markdown)
     chunks = _group_blocks(blocks, document_id)
     chunks = _apply_overlap(chunks)
+    for chunk in chunks:
+        chunk.content_hash = hashlib.sha256(chunk.content.encode()).hexdigest()
     logger.info(
         "Chunked document %s → %d chunks (tokens: %s)",
         document_id[:12],
@@ -344,8 +348,9 @@ async def save_chunks(chunks: list[Chunk]) -> list[str]:
                 row = await conn.fetchrow(
                     "INSERT INTO chunks "
                     "(document_id, chunk_index, content, token_count, "
-                    "section_path, has_table, has_code, overlap_tokens, metadata) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb) "
+                    "section_path, has_table, has_code, overlap_tokens, "
+                    "metadata, content_hash) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10) "
                     "RETURNING id",
                     chunk.document_id,
                     chunk.chunk_index,
@@ -356,8 +361,20 @@ async def save_chunks(chunks: list[Chunk]) -> list[str]:
                     chunk.has_code,
                     chunk.overlap_tokens,
                     json.dumps(chunk.metadata),
+                    chunk.content_hash,
                 )
                 ids.append(str(row["id"]))
 
     logger.info("Saved %d chunks for document %s", len(ids), document_id[:12])
     return ids
+
+
+async def get_chunk_hashes(document_id: str) -> dict[int, str]:
+    """Return {chunk_index: content_hash} for a document's chunks."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT chunk_index, content_hash FROM chunks "
+        "WHERE document_id = $1::uuid AND content_hash IS NOT NULL",
+        document_id,
+    )
+    return {row["chunk_index"]: row["content_hash"] for row in rows}

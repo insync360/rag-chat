@@ -37,5 +37,12 @@ class Settings:
     GRAPH_BATCH_SIZE: int = 100
     COREF_ENABLED: bool = True
 
+    # Incremental graph updates
+    INCREMENTAL_GRAPH_ENABLED: bool = True
+    ENTITY_FUZZY_THRESHOLD: float = 85.0        # rapidfuzz token_sort_ratio (0-100)
+    ENTITY_EMBEDDING_THRESHOLD: float = 0.92    # cosine similarity (0-1)
+    ENTITY_EMBEDDING_MODEL: str = "text-embedding-3-large"
+    ENTITY_EMBEDDING_DIMENSIONS: int = 256      # reduced dims — entity names are short
+
 
 settings = Settings()

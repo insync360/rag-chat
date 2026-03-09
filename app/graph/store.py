@@ -41,16 +41,23 @@ async def store_graph(
                 UNWIND $entities AS e
                 MERGE (n:Entity {name: e.name, type: e.type})
                 ON CREATE SET
-                    n.source_document_id = e.doc_id,
+                    n.source_document_ids = [e.doc_id],
                     n.source_chunk_index = e.chunk_index,
                     n.confidence = e.confidence,
                     n.properties = e.properties,
+                    n.status = 'active',
                     n.created_at = $now,
                     n.updated_at = $now
                 ON MATCH SET
+                    n.source_document_ids = CASE
+                        WHEN n.source_document_ids IS NOT NULL AND NOT e.doc_id IN n.source_document_ids
+                        THEN n.source_document_ids + e.doc_id
+                        WHEN n.source_document_ids IS NULL THEN [e.doc_id]
+                        ELSE n.source_document_ids END,
                     n.confidence = CASE WHEN e.confidence > n.confidence
                         THEN e.confidence ELSE n.confidence END,
                     n.properties = e.properties,
+                    n.status = 'active',
                     n.updated_at = $now
                 """,
                 entities=params, now=now,
@@ -104,11 +111,55 @@ async def store_graph(
 
 
 async def clear_document_graph(document_id: str) -> None:
-    """Remove all entities (and their relationships) for a document."""
+    """Deprecate all entities for a document (never delete)."""
     driver = await get_driver()
+    now = datetime.now(timezone.utc).isoformat()
     async with driver.session() as session:
         await session.run(
-            "MATCH (e:Entity {source_document_id: $doc_id}) DETACH DELETE e",
+            """
+            MATCH (e:Entity)
+            WHERE e.source_document_ids IS NOT NULL AND $doc_id IN e.source_document_ids
+            SET e.status = 'deprecated', e.deprecated_at = $now
+            """,
+            doc_id=document_id, now=now,
+        )
+    logger.info("Deprecated graph entities for document %s", document_id[:12])
+
+
+async def deprecate_chunk_entities(document_id: str, chunk_indices: set[int]) -> None:
+    """Mark entities from specific chunks as deprecated (not deleted)."""
+    if not chunk_indices:
+        return
+    driver = await get_driver()
+    now = datetime.now(timezone.utc).isoformat()
+    async with driver.session() as session:
+        await session.run(
+            """
+            MATCH (e:Entity)
+            WHERE e.source_document_ids IS NOT NULL AND $doc_id IN e.source_document_ids
+              AND e.source_chunk_index IN $indices
+            SET e.status = 'deprecated', e.deprecated_at = $now
+            """,
+            doc_id=document_id, indices=list(chunk_indices), now=now,
+        )
+    logger.info(
+        "Deprecated entities for doc %s chunks %s", document_id[:12], chunk_indices,
+    )
+
+
+async def get_document_entities(document_id: str) -> list[dict]:
+    """Fetch existing active entities from Neo4j for a document."""
+    driver = await get_driver()
+    async with driver.session() as session:
+        result = await session.run(
+            """
+            MATCH (e:Entity)
+            WHERE e.source_document_ids IS NOT NULL AND $doc_id IN e.source_document_ids
+              AND e.status = 'active'
+            RETURN e.name AS name, e.type AS type, e.confidence AS confidence,
+                   e.properties AS properties, e.source_chunk_index AS source_chunk_index
+            """,
             doc_id=document_id,
         )
-    logger.info("Cleared graph for document %s", document_id[:12])
+        records = [record.data() async for record in result]
+    return records
