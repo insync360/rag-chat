@@ -48,14 +48,14 @@ async def _read_graph() -> tuple[list[dict], list[dict]]:
     async with driver.session() as session:
         ent_result = await session.run(
             "MATCH (e:Entity) WHERE e.status = 'active' "
-            "RETURN id(e) AS neo4j_id, e.name AS name, e.type AS type"
+            "RETURN elementId(e) AS neo4j_id, e.name AS name, e.type AS type"
         )
         entities = [dict(r) async for r in ent_result]
 
         rel_result = await session.run(
             "MATCH (s:Entity)-[r]->(t:Entity) "
             "WHERE s.status = 'active' AND t.status = 'active' "
-            "RETURN id(s) AS source_id, id(t) AS target_id, "
+            "RETURN elementId(s) AS source_id, elementId(t) AS target_id, "
             "type(r) AS rel_type, coalesce(r.confidence, 1.0) AS weight"
         )
         relationships = [dict(r) async for r in rel_result]
@@ -69,11 +69,11 @@ async def _read_graph() -> tuple[list[dict], list[dict]]:
 
 def _build_igraph(
     entities: list[dict], relationships: list[dict],
-) -> "tuple[igraph.Graph, dict[int, int], list[dict]]":  # noqa: F821
+) -> "tuple[igraph.Graph, dict[str, int], list[dict]]":  # noqa: F821
     """Build an undirected igraph.Graph from Neo4j entities/relationships."""
     import igraph
 
-    id_to_idx: dict[int, int] = {}
+    id_to_idx: dict[str, int] = {}
     for i, ent in enumerate(entities):
         id_to_idx[ent["neo4j_id"]] = i
 
@@ -126,7 +126,7 @@ async def _write_community_ids(assignments: list[dict]) -> None:
     async with driver.session() as session:
         await session.run(
             "UNWIND $assignments AS a "
-            "MATCH (e:Entity) WHERE id(e) = a.neo4j_id "
+            "MATCH (e:Entity) WHERE elementId(e) = a.neo4j_id "
             "SET e.community_id = a.community_id",
             assignments=assignments,
         )
@@ -162,7 +162,7 @@ def _build_community_infos(
         comm_entities[cid].append(ent)
 
     # Collect relationship types per community
-    entity_to_community: dict[int, int] = {}
+    entity_to_community: dict[str, int] = {}
     for ent, cid in zip(entities, membership):
         entity_to_community[ent["neo4j_id"]] = cid
 
