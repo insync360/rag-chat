@@ -275,15 +275,26 @@ async def ingest_files(file_paths: list[str | Path]) -> PipelineResult:
         files.append(result)
 
     # Post-batch community detection (once for entire batch)
+    community_result = None
     if any(f.status == PipelineStatus.COMPLETED for f in files):
         try:
             from app.graph.community import detect_communities
             t = time.perf_counter()
-            await detect_communities()
+            community_result = await detect_communities()
             community_ms = _ms_since(t)
             logger.info("Community detection completed in %.1fms", community_ms)
         except Exception as exc:
             logger.warning("Post-batch community detection failed: %s", exc)
+
+        # Post-batch community summary embeddings (after community detection)
+        try:
+            from app.graph.community_embeddings import generate_community_summary_embeddings
+            t = time.perf_counter()
+            comm_list = community_result.communities if community_result else None
+            await generate_community_summary_embeddings(communities=comm_list)
+            logger.info("Community summary embeddings completed in %.1fms", _ms_since(t))
+        except Exception as exc:
+            logger.warning("Post-batch community summary embeddings failed: %s", exc)
 
         # Post-batch graph embeddings (after community detection)
         try:
@@ -293,6 +304,15 @@ async def ingest_files(file_paths: list[str | Path]) -> PipelineResult:
             logger.info("Graph embeddings completed in %.1fms", _ms_since(t))
         except Exception as exc:
             logger.warning("Post-batch graph embeddings failed: %s", exc)
+
+        # Post-batch TransE embeddings (after GraphSAGE -- needs entity rows to exist)
+        try:
+            from app.graph.transe import generate_transe_embeddings
+            t = time.perf_counter()
+            await generate_transe_embeddings(force_retrain=True)
+            logger.info("TransE embeddings completed in %.1fms", _ms_since(t))
+        except Exception as exc:
+            logger.warning("Post-batch TransE embeddings failed: %s", exc)
 
     total_ms = _ms_since(start)
     return PipelineResult(

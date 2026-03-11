@@ -57,6 +57,16 @@ class Settings:
     GRAPHSAGE_SEED: int = 42
     GRAPHSAGE_MODEL_DIR: str = "models"
 
+    # TransE relation embeddings
+    TRANSE_ENABLED: bool = True
+    TRANSE_DIM: int = 128
+    TRANSE_EPOCHS: int = 200
+    TRANSE_LR: float = 0.01
+    TRANSE_MARGIN: float = 1.0
+    TRANSE_BATCH_SIZE: int = 512
+    TRANSE_SEED: int = 42
+    TRANSE_MODEL_DIR: str = "models"
+
     # Chunk embeddings
     CHUNK_EMBEDDING_MODEL: str = "text-embedding-3-large"
     CHUNK_EMBEDDING_DIMENSIONS: int = 2000  # Neon pgvector HNSW limit (text-embedding-3-large supports reduced dims)
@@ -68,6 +78,12 @@ class Settings:
     COMMUNITY_SUMMARY_MODEL: str = "gpt-4o-mini"
     COMMUNITY_MIN_SIZE: int = 2          # skip singletons for summaries
     COMMUNITY_RESOLUTION: float = 1.0   # Leiden resolution (higher = more communities)
+
+    # Community summary embeddings
+    COMMUNITY_SUMMARY_EMBEDDING_ENABLED: bool = True
+    COMMUNITY_SUMMARY_EMBEDDING_MODEL: str = "text-embedding-3-large"
+    COMMUNITY_SUMMARY_EMBEDDING_DIMENSIONS: int = 512
+    COMMUNITY_SUMMARY_EMBEDDING_BATCH_SIZE: int = 2048
 
 
 settings = Settings()

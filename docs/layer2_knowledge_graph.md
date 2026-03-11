@@ -22,7 +22,7 @@ Step 5 was added by Layer 2. Steps 1–4 and 6 are from Layer 1.
 **Graph extraction sub-pipeline:**
 
 ```
-Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Neo4j Store] → [Community Detection] → [Graph Embeddings]
+Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Neo4j Store] → [Community Detection] → [Community Summary Embeddings] → [Graph Embeddings] → [TransE Embeddings]
 ```
 
 | Sub-step | Module | Purpose |
@@ -32,7 +32,9 @@ Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Ne
 | 3-Tier Dedup | `dedup.py` | Exact → fuzzy → embedding entity deduplication |
 | Neo4j Store | `store.py` | MERGE upsert entities + relationships |
 | Community Detection | `community.py` | Leiden clustering + LLM summaries |
+| Community Summary Embeddings | `community_embeddings.py` | Embed community summaries → Neon pgvector |
 | Graph Embeddings | `embeddings.py` | GraphSAGE structural embeddings → Neon pgvector |
+| TransE Embeddings | `transe.py` | TransE relation embeddings → Neon pgvector |
 
 ---
 
@@ -43,7 +45,7 @@ Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Ne
 | File | Lines | Purpose |
 |------|-------|---------|
 | `__init__.py` | 150 | `extract_and_store_graph()` — single integration point called by pipeline |
-| `models.py` | 60 | Dataclasses: Entity, Relationship, GraphExtractionResult, CommunityInfo, CommunityDetectionResult, GraphEmbeddingResult |
+| `models.py` | 80 | Dataclasses: Entity, Relationship, GraphExtractionResult, CommunityInfo, CommunityDetectionResult, GraphEmbeddingResult, TransEResult, CommunitySummaryEmbeddingResult |
 | `extractor.py` | 134 | GPT-4o entity + relationship extraction (1 call per chunk) |
 | `coref.py` | 132 | Coreference resolution via fastcoref (FCoref model) |
 | `dedup.py` | 246 | 3-tier entity dedup (exact → fuzzy → embedding) + relationship dedup |
@@ -51,14 +53,16 @@ Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Ne
 | `store.py` | 166 | MERGE entities/relationships into Neo4j, deprecation functions |
 | `community.py` | 299 | Leiden community detection + GPT-4o-mini summaries |
 | `embeddings.py` | 290 | GraphSAGE structural embeddings (pure PyTorch) + Neon pgvector storage |
+| `community_embeddings.py` | 130 | Community summary embeddings (OpenAI) + Neon pgvector storage |
+| `transe.py` | 250 | TransE relation embeddings (pure PyTorch) + Neon pgvector storage |
 | `neo4j_client.py` | 26 | Async Neo4j driver singleton |
 
 ### Modified Files
 
 | File | Lines | Change |
 |------|-------|--------|
-| `app/config.py` | 66 | Neo4j + graph extraction + coref + incremental + community + GraphSAGE settings |
-| `app/ingestion/pipeline.py` | 298 | Added `graph_extract` step, post-batch community detection + graph embeddings |
+| `app/config.py` | 88 | Neo4j + graph extraction + coref + incremental + community + community summary embeddings + GraphSAGE + TransE settings |
+| `app/ingestion/pipeline.py` | 325 | Added `graph_extract` step, post-batch community detection + community summary embeddings + graph embeddings + TransE |
 | `requirements.txt` | — | Added `neo4j`, `fastcoref`, `transformers`, `rapidfuzz`, `leidenalg`, `igraph`, `torch` |
 
 ### Test Files
@@ -72,6 +76,8 @@ Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Ne
 | `Test Cases/test_graph_coref.py` | 335 | — | Sliding window, short mention replacement, graceful degradation |
 | `Test Cases/test_graph_integration.py` | 126 | 4 | Full flow success, Neo4j failure returns skipped, disabled flag skips, pipeline continues on failure |
 | `Test Cases/test_graph_embeddings.py` | 170 | 11 | Adjacency building, GraphSAGE model shape/normalization, isolated nodes, disabled/missing-torch skip, pipeline integration |
+| `Test Cases/test_community_embeddings.py` | 180 | 11 | Enriched text building, disabled/empty/no-summaries/OpenAI-failure skip, pipeline integration |
+| `Test Cases/test_transe.py` | 200 | 12 | Triple data building, TransE model shape/normalization/translation, disabled/missing-torch/empty skip, pipeline integration |
 | `Test Cases/test_layer2_e2e.py` | 266 | 1 | Full E2E: Neon chunks → graph extraction → community detection → Neo4j verification |
 
 ---
@@ -386,6 +392,97 @@ Generates 128-dim GraphSAGE structural embeddings for all active entities. Encod
 
 ---
 
+### 3.10 TransE Relation Embeddings (`app/graph/transe.py`)
+
+**Function**: `generate_transe_embeddings(*, force_retrain) -> TransEResult`
+
+Generates 128-dim TransE translational embeddings where `h + r ≈ t` for each (head, relation, tail) triple. Captures typed relationship semantics — complementary to GraphSAGE's neighborhood structure.
+
+**Why both GraphSAGE and TransE:** GraphSAGE encodes neighborhood aggregation (who is near whom). TransE encodes typed translational structure (how entities relate). Together they give the retrieval layer two similarity metrics.
+
+**Pure PyTorch** — same dependency as GraphSAGE.
+
+**Pipeline:**
+1. Read (head, relation, tail) triples from Neo4j (includes `type(r)` unlike GraphSAGE)
+2. Map entities/relations to integer indices, filter self-loops, deduplicate
+3. Train TransE with margin-based ranking loss (or load saved model)
+4. Store per-relation embeddings in `relation_embeddings` table
+5. UPDATE existing `entity_embeddings` rows with `transe_embedding` column
+
+**TransE model:**
+- `nn.Embedding` for entities and relations, Xavier initialized
+- L2-normalized output accessors for cosine similarity storage
+- Entity key format: `"name::type"` for type disambiguation
+
+**Training:**
+- Margin-based ranking loss: `max(0, ||h+r-t|| - ||h'+r-t'|| + margin)`
+- Negative sampling: 50/50 corrupt head or tail with random entity
+- Entity embeddings L2-normalized after each gradient step (standard TransE constraint)
+- Relation embeddings unconstrained during training (translation vectors)
+- Optimizer: Adam, lr=0.01, 200 epochs, margin=1.0
+- Batch size: 512 triples per epoch (sampled if more)
+- CPU-bound: runs in `loop.run_in_executor()`
+
+**Model persistence:**
+- Saves to `models/transe_weights.pt` (state_dict + `ent_to_idx` + `rel_to_idx`)
+- Pipeline calls with `force_retrain=True` (graph has changed after ingestion)
+
+**Storage:**
+- `relation_embeddings` table: one 128-dim embedding per relation type (HNSW indexed)
+- `entity_embeddings.transe_embedding`: 128-dim per entity (HNSW indexed)
+- Enables vector arithmetic retrieval: find entities related via similar relation types
+
+**Ordering:** Runs AFTER GraphSAGE because `_store_transe_entity_embeddings` does UPDATE on existing `entity_embeddings` rows that GraphSAGE creates via INSERT.
+
+**Graceful degradation:**
+- If `torch` not installed → returns `skipped=True`
+- If `TRANSE_ENABLED=False` → returns `skipped=True`
+- Never raises — catches all exceptions
+
+---
+
+### 3.11 Community Summary Embeddings (`app/graph/community_embeddings.py`)
+
+**Function**: `generate_community_summary_embeddings(communities=None) -> CommunitySummaryEmbeddingResult`
+
+Embeds community summaries via OpenAI `text-embedding-3-large` (512 dims) and stores in Neon pgvector. Enables high-level thematic retrieval: match a user query to community themes first, then drill into entity/chunk results within that community.
+
+**Why 512 dims**: Entity names use 256 dims (1-3 words). Community summaries are 1-2 full sentences with richer semantics — 512 captures more nuance while staying well below the 2000-dim HNSW limit.
+
+**Pipeline:**
+1. Get communities (from pipeline parameter or Neo4j standalone path)
+2. Filter to communities with summaries (`summary is not None`)
+3. Build enriched text per community (entities, types, relationships, summary)
+4. Batch embed via OpenAI `text-embedding-3-large` (512 dims)
+5. Upsert to `community_summary_embeddings` table
+6. Cleanup stale community IDs from prior Leiden runs
+
+**Enriched text format** (mirrors `embedder.py` pattern):
+```
+Entities: Acme Corp, John Smith, Jane Doe
+Entity types: Organization, Person
+Relationships: EMPLOYS, REPORTS_TO
+Summary: A corporate employment cluster centered on Acme Corp...
+```
+
+**Standalone path**: When `communities=None`, reads `Community` nodes + `Entity` nodes grouped by `community_id` + relationship types per community from Neo4j. Used for ad-hoc embedding without running the full pipeline.
+
+**Stale cleanup**: Leiden reassigns community IDs on each run. `_cleanup_stale_communities()` deletes rows from `community_summary_embeddings` where `community_id` is not in the current active set.
+
+**Storage:**
+- Neon table: `community_summary_embeddings` with HNSW index on 512-dim embedding
+- `community_id INTEGER` unique index for upsert
+- `summary_text TEXT` stores the enriched text that was embedded (for display/debugging)
+
+**Ordering:** Runs AFTER community detection (needs summaries) and BEFORE GraphSAGE (independent, but logically groups community work together).
+
+**Graceful degradation:**
+- If `COMMUNITY_SUMMARY_EMBEDDING_ENABLED=False` → returns `skipped=True`
+- If OpenAI API fails → returns `skipped=True` with error
+- Never raises — catches all exceptions
+
+---
+
 ## 4. Configuration
 
 All settings from `app/config.py`:
@@ -433,6 +530,15 @@ All settings from `app/config.py`:
 | `COMMUNITY_MIN_SIZE` | `2` | Skip singletons for summaries |
 | `COMMUNITY_RESOLUTION` | `1.0` | Leiden resolution parameter (higher = more communities) |
 
+### Community Summary Embeddings
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `COMMUNITY_SUMMARY_EMBEDDING_ENABLED` | `True` | Enable/disable community summary embedding |
+| `COMMUNITY_SUMMARY_EMBEDDING_MODEL` | `text-embedding-3-large` | OpenAI embedding model |
+| `COMMUNITY_SUMMARY_EMBEDDING_DIMENSIONS` | `512` | Embedding dimensions (richer than 256 entity dims) |
+| `COMMUNITY_SUMMARY_EMBEDDING_BATCH_SIZE` | `2048` | Max texts per OpenAI API call |
+
 ### Graph Embeddings (GraphSAGE)
 
 | Setting | Default | Purpose |
@@ -448,6 +554,19 @@ All settings from `app/config.py`:
 | `GRAPHSAGE_BATCH_SIZE` | `512` | Edge batch size for training |
 | `GRAPHSAGE_SEED` | `42` | Deterministic seed |
 | `GRAPHSAGE_MODEL_DIR` | `models` | Directory for saved model weights |
+
+### TransE Relation Embeddings
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `TRANSE_ENABLED` | `True` | Enable/disable TransE embeddings |
+| `TRANSE_DIM` | `128` | Embedding dimension |
+| `TRANSE_EPOCHS` | `200` | Training epochs |
+| `TRANSE_LR` | `0.01` | Adam learning rate |
+| `TRANSE_MARGIN` | `1.0` | Margin for ranking loss |
+| `TRANSE_BATCH_SIZE` | `512` | Triple batch size for training |
+| `TRANSE_SEED` | `42` | Deterministic seed |
+| `TRANSE_MODEL_DIR` | `models` | Directory for saved model weights |
 
 ---
 
@@ -498,10 +617,19 @@ Running coreference resolution before GPT-4o extraction improves entity consiste
 | `leidenalg`/`igraph` not installed | Community detection returns `skipped=True` |
 | Community summary fails for one community | Logs warning, that community gets no summary, others proceed |
 | Incremental entity fetch fails | Logs warning, falls back to dedup without existing entities |
-| `torch` not installed | Graph embeddings returns `skipped=True` |
+| `torch` not installed | Graph embeddings and TransE return `skipped=True` |
 | `GRAPH_EMBEDDINGS_ENABLED=False` | Graph embeddings skipped immediately |
+| `TRANSE_ENABLED=False` | TransE embeddings skipped immediately |
+| No triples in Neo4j | TransE returns `error="no valid triples"`, `skipped=False` |
+| All triples are self-loops | TransE returns `error="no valid triples"` after filtering |
+| Single relation type | TransE works — 1 relation embedding, entities still get TransE embeddings |
+| TransE training fails | Returns `skipped=True`, pipeline continues |
 | OpenAI embedding API fails during feature generation | Graph embeddings returns `skipped=True`, pipeline continues |
 | GraphSAGE training fails | Graph embeddings returns `skipped=True`, pipeline continues |
+| `COMMUNITY_SUMMARY_EMBEDDING_ENABLED=False` | Community summary embeddings skipped immediately |
+| No communities with summaries | Community summary embeddings returns `community_count=0`, `skipped=False` |
+| OpenAI API fails during community embedding | Returns `skipped=True` with error, pipeline continues |
+| Stale community IDs from prior Leiden run | `_cleanup_stale_communities()` deletes rows not in current ID set |
 
 ---
 

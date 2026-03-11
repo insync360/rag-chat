@@ -60,3 +60,21 @@ class GraphEmbeddingResult:
     skipped: bool = False
     error: str | None = None
     retrained: bool = False
+
+
+@dataclass
+class TransEResult:
+    entity_count: int
+    relation_count: int
+    embedding_dim: int
+    skipped: bool = False
+    error: str | None = None
+    retrained: bool = False
+
+
+@dataclass
+class CommunitySummaryEmbeddingResult:
+    community_count: int
+    embedding_dim: int
+    skipped: bool = False
+    error: str | None = None
