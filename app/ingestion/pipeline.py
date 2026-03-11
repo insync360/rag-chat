@@ -314,6 +314,17 @@ async def ingest_files(file_paths: list[str | Path]) -> PipelineResult:
         except Exception as exc:
             logger.warning("Post-batch TransE embeddings failed: %s", exc)
 
+        # Post-batch hybrid chunk-entity embeddings (after TransE -- needs both chunk + entity embeddings)
+        try:
+            from app.graph.hybrid_embeddings import generate_hybrid_embeddings
+            t = time.perf_counter()
+            batch_doc_ids = [f.document_id for f in files
+                             if f.status == PipelineStatus.COMPLETED and f.document_id]
+            await generate_hybrid_embeddings(document_ids=batch_doc_ids)
+            logger.info("Hybrid embeddings completed in %.1fms", _ms_since(t))
+        except Exception as exc:
+            logger.warning("Post-batch hybrid embeddings failed: %s", exc)
+
     total_ms = _ms_since(start)
     return PipelineResult(
         total=len(files),

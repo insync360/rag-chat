@@ -78,3 +78,11 @@ class CommunitySummaryEmbeddingResult:
     embedding_dim: int
     skipped: bool = False
     error: str | None = None
+
+
+@dataclass
+class HybridEmbeddingResult:
+    chunk_count: int
+    embedding_dim: int
+    skipped: bool = False
+    error: str | None = None

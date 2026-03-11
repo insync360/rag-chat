@@ -22,7 +22,7 @@ Step 5 was added by Layer 2. Steps 1–4 and 6 are from Layer 1.
 **Graph extraction sub-pipeline:**
 
 ```
-Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Neo4j Store] → [Community Detection] → [Community Summary Embeddings] → [Graph Embeddings] → [TransE Embeddings]
+Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Neo4j Store] → [Community Detection] → [Community Summary Embeddings] → [Graph Embeddings] → [TransE Embeddings] → [Hybrid Chunk-Entity Embeddings]
 ```
 
 | Sub-step | Module | Purpose |
@@ -35,6 +35,7 @@ Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Ne
 | Community Summary Embeddings | `community_embeddings.py` | Embed community summaries → Neon pgvector |
 | Graph Embeddings | `embeddings.py` | GraphSAGE structural embeddings → Neon pgvector |
 | TransE Embeddings | `transe.py` | TransE relation embeddings → Neon pgvector |
+| Hybrid Chunk-Entity Embeddings | `hybrid_embeddings.py` | Combined text + graph structure embeddings → Neon pgvector |
 
 ---
 
@@ -45,24 +46,25 @@ Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Ne
 | File | Lines | Purpose |
 |------|-------|---------|
 | `__init__.py` | 150 | `extract_and_store_graph()` — single integration point called by pipeline |
-| `models.py` | 80 | Dataclasses: Entity, Relationship, GraphExtractionResult, CommunityInfo, CommunityDetectionResult, GraphEmbeddingResult, TransEResult, CommunitySummaryEmbeddingResult |
+| `models.py` | 88 | Dataclasses: Entity, Relationship, GraphExtractionResult, CommunityInfo, CommunityDetectionResult, GraphEmbeddingResult, TransEResult, CommunitySummaryEmbeddingResult, HybridEmbeddingResult |
 | `extractor.py` | 134 | GPT-4o entity + relationship extraction (1 call per chunk) |
 | `coref.py` | 132 | Coreference resolution via fastcoref (FCoref model) |
 | `dedup.py` | 246 | 3-tier entity dedup (exact → fuzzy → embedding) + relationship dedup |
 | `schema.py` | 51 | Idempotent Neo4j constraints, indexes, and auto-migrations |
 | `store.py` | 166 | MERGE entities/relationships into Neo4j, deprecation functions |
 | `community.py` | 299 | Leiden community detection + GPT-4o-mini summaries |
-| `embeddings.py` | 290 | GraphSAGE structural embeddings (pure PyTorch) + Neon pgvector storage |
-| `community_embeddings.py` | 130 | Community summary embeddings (OpenAI) + Neon pgvector storage |
-| `transe.py` | 250 | TransE relation embeddings (pure PyTorch) + Neon pgvector storage |
+| `embeddings.py` | 424 | GraphSAGE structural embeddings (pure PyTorch) + Neon pgvector storage |
+| `community_embeddings.py` | 233 | Community summary embeddings (OpenAI) + Neon pgvector storage |
+| `transe.py` | 361 | TransE relation embeddings (pure PyTorch) + Neon pgvector storage |
+| `hybrid_embeddings.py` | 254 | Hybrid chunk-entity embeddings (text + GraphSAGE + TransE) → Neon pgvector |
 | `neo4j_client.py` | 26 | Async Neo4j driver singleton |
 
 ### Modified Files
 
 | File | Lines | Change |
 |------|-------|--------|
-| `app/config.py` | 88 | Neo4j + graph extraction + coref + incremental + community + community summary embeddings + GraphSAGE + TransE settings |
-| `app/ingestion/pipeline.py` | 325 | Added `graph_extract` step, post-batch community detection + community summary embeddings + graph embeddings + TransE |
+| `app/config.py` | 92 | Neo4j + graph extraction + coref + incremental + community + community summary embeddings + GraphSAGE + TransE + hybrid settings |
+| `app/ingestion/pipeline.py` | 340 | Added `graph_extract` step, post-batch community detection + community summary embeddings + graph embeddings + TransE + hybrid |
 | `requirements.txt` | — | Added `neo4j`, `fastcoref`, `transformers`, `rapidfuzz`, `leidenalg`, `igraph`, `torch` |
 
 ### Test Files
@@ -71,13 +73,16 @@ Chunks → [Coref Resolution] → [GPT-4o Extraction] → [3-Tier Dedup] → [Ne
 |------|-------|-------|----------|
 | `Test Cases/test_graph_extractor.py` | 145 | 6 | LLM extraction success, tiny chunk skip, failure fallback, invalid JSON retry, concurrency, freeform types |
 | `Test Cases/test_graph_dedup.py` | 93 | 6 | Exact duplicate merge, different types kept, highest confidence wins, property merge, empty input, relationship dedup |
-| `Test Cases/test_graph_dedup_enhanced.py` | 244 | — | 3-tier dedup (exact → fuzzy → embedding), incremental merge with existing entities |
+| `Test Cases/test_graph_dedup_enhanced.py` | 244 | 7 | 3-tier dedup (exact → fuzzy → embedding), incremental merge with existing entities |
 | `Test Cases/test_graph_store.py` | 100 | 5 | Entity MERGE, relationship MERGE, clear document graph, batching, Neo4j down |
-| `Test Cases/test_graph_coref.py` | 335 | — | Sliding window, short mention replacement, graceful degradation |
+| `Test Cases/test_graph_coref.py` | 335 | 5 | Sliding window, short mention replacement, graceful degradation |
 | `Test Cases/test_graph_integration.py` | 126 | 4 | Full flow success, Neo4j failure returns skipped, disabled flag skips, pipeline continues on failure |
-| `Test Cases/test_graph_embeddings.py` | 170 | 11 | Adjacency building, GraphSAGE model shape/normalization, isolated nodes, disabled/missing-torch skip, pipeline integration |
-| `Test Cases/test_community_embeddings.py` | 180 | 11 | Enriched text building, disabled/empty/no-summaries/OpenAI-failure skip, pipeline integration |
-| `Test Cases/test_transe.py` | 200 | 12 | Triple data building, TransE model shape/normalization/translation, disabled/missing-torch/empty skip, pipeline integration |
+| `Test Cases/test_graph_embeddings.py` | 201 | 11 | Adjacency building, GraphSAGE model shape/normalization, isolated nodes, disabled/missing-torch skip, pipeline integration |
+| `Test Cases/test_community_detection.py` | 249 | 6 | Leiden clustering, LLM summaries, community assignment |
+| `Test Cases/test_community_embeddings.py` | 207 | 11 | Enriched text building, disabled/empty/no-summaries/OpenAI-failure skip, pipeline integration |
+| `Test Cases/test_transe.py` | 271 | 13 | Triple data building, TransE model shape/normalization/translation, disabled/missing-torch/empty skip, pipeline integration |
+| `Test Cases/test_hybrid_embeddings.py` | 228 | 15 | Truncate/normalize, mean pooling, hybrid building, disabled/empty/failure skip, pipeline integration |
+| `Test Cases/test_incremental_graph.py` | 322 | 7 | Incremental extraction, entity merging, chunk deprecation |
 | `Test Cases/test_layer2_e2e.py` | 266 | 1 | Full E2E: Neon chunks → graph extraction → community detection → Neo4j verification |
 
 ---
@@ -115,7 +120,7 @@ Orchestrates the full graph extraction sub-pipeline. Two modes:
 
 ### 3.2 Data Models (`app/graph/models.py`)
 
-5 dataclasses:
+9 dataclasses:
 
 ```python
 @dataclass
@@ -483,6 +488,44 @@ Summary: A corporate employment cluster centered on Acme Corp...
 
 ---
 
+### 3.12 Hybrid Chunk-Entity Embeddings (`app/graph/hybrid_embeddings.py`)
+
+**Function**: `generate_hybrid_embeddings(document_ids=None) -> HybridEmbeddingResult`
+
+Creates a 768-dim hybrid embedding per chunk that combines truncated text content with the structural graph context of entities extracted from that chunk. Gives the retrieval layer a single vector capturing both "what the chunk says" and "how its entities connect in the knowledge graph."
+
+**No additional API calls** — reuses existing embeddings from `chunk_embeddings` (2000-dim text) and `entity_embeddings` (128-dim GraphSAGE + 128-dim TransE).
+
+**Composition (768 dims):**
+1. **Chunk text (512 dims)** — MRL truncation of 2000-dim `text-embedding-3-large` embedding, L2-normalized
+2. **Entity structural mean (128 dims)** — mean-pooled GraphSAGE embeddings of entities in the chunk, L2-normalized
+3. **Entity TransE mean (128 dims)** — mean-pooled TransE embeddings of entities in the chunk, L2-normalized
+4. **Final L2-normalization** of the full 768-dim concatenated vector
+
+**Why NOT entity text embeddings (256-dim)**: Those embed `"name (type)"` — redundant since entity names appear in the chunk text. GraphSAGE and TransE add genuinely new structural/relational signals.
+
+**Pipeline:**
+1. Read chunk IDs + embeddings from Neon (scoped by `document_ids` or all)
+2. Read entity-chunk mapping from Neo4j (`source_document_ids[0]` + `source_chunk_index`)
+3. Read entity structural + TransE embeddings from Neon
+4. For each chunk: look up entities, gather their embeddings, build hybrid
+5. Batch UPDATE `hybrid_embedding` column on `chunk_embeddings`
+
+**Entity-chunk mapping**: Uses `source_document_ids[0]` only — `source_chunk_index` is set ON CREATE and only valid for the first extraction document. V1 limitation for multi-document entities.
+
+**No torch/numpy dependency** — pure `math` module for vector operations (truncate, mean, normalize).
+
+**Ordering:** Runs AFTER TransE — needs both chunk embeddings and entity embeddings (GraphSAGE structural + TransE relational) to exist.
+
+**Graceful degradation:**
+- Chunks with no entities → entity portions zero-filled (text-only hybrid)
+- Entity has structural but no TransE → TransE portion zero-filled for that entity
+- Entity in chunk map but not in `entity_embeddings` → skipped
+- If `HYBRID_CHUNK_ENTITY_ENABLED=False` → returns `skipped=True`
+- Never raises — catches all exceptions
+
+---
+
 ## 4. Configuration
 
 All settings from `app/config.py`:
@@ -568,6 +611,15 @@ All settings from `app/config.py`:
 | `TRANSE_SEED` | `42` | Deterministic seed |
 | `TRANSE_MODEL_DIR` | `models` | Directory for saved model weights |
 
+### Hybrid Chunk-Entity Embeddings
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `HYBRID_CHUNK_ENTITY_ENABLED` | `True` | Enable/disable hybrid chunk-entity embeddings |
+| `HYBRID_CHUNK_TEXT_DIM` | `512` | MRL truncation dimension for chunk text embedding |
+
+Total hybrid dim = `HYBRID_CHUNK_TEXT_DIM + GRAPHSAGE_OUTPUT_DIM + TRANSE_DIM` = 512 + 128 + 128 = 768. Derived from existing settings to avoid config drift.
+
 ---
 
 ## 5. Key Design Decisions
@@ -630,6 +682,13 @@ Running coreference resolution before GPT-4o extraction improves entity consiste
 | No communities with summaries | Community summary embeddings returns `community_count=0`, `skipped=False` |
 | OpenAI API fails during community embedding | Returns `skipped=True` with error, pipeline continues |
 | Stale community IDs from prior Leiden run | `_cleanup_stale_communities()` deletes rows not in current ID set |
+| `HYBRID_CHUNK_ENTITY_ENABLED=False` | Hybrid embeddings skipped immediately |
+| Chunk has no entities | Entity portions zero-filled → text-only hybrid (512 dims active, 256 dims zero) |
+| Entity has structural but no TransE | TransE portion zero-filled for that entity, structural still used |
+| Entity in chunk map but not in `entity_embeddings` | Entity skipped, other entities for chunk still used |
+| No `entity_embeddings` rows at all | All chunks get text-only hybrids |
+| Neo4j/Neon failure during hybrid | Returns `skipped=True` with error, pipeline continues |
+| Multi-document entity | Only enriches first extraction chunk (V1 limitation) |
 
 ---
 

@@ -85,5 +85,9 @@ class Settings:
     COMMUNITY_SUMMARY_EMBEDDING_DIMENSIONS: int = 512
     COMMUNITY_SUMMARY_EMBEDDING_BATCH_SIZE: int = 2048
 
+    # Hybrid chunk-entity embeddings
+    HYBRID_CHUNK_ENTITY_ENABLED: bool = True
+    HYBRID_CHUNK_TEXT_DIM: int = 512  # MRL truncation of 2000-dim chunk embedding
+
 
 settings = Settings()

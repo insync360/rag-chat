@@ -9,7 +9,7 @@
 
 Layer 1 is a 7-stage document ingestion pipeline that transforms raw files into enriched, structure-aware chunks with vector embeddings stored in Neon PostgreSQL (pgvector). Every stage is idempotent and failure-resilient.
 
-**Pipeline stages:**
+**Per-file pipeline stages:**
 
 ```
 File → [1. Parse] → [2. Version Track] → [3. Chunk] → [4. Enrich] → [5. Graph Extract] → [6. Save] → [7. Embed]
@@ -25,26 +25,44 @@ File → [1. Parse] → [2. Version Track] → [3. Chunk] → [4. Enrich] → [5
 | Save | `chunker.py` + `pipeline.py` | Persist chunks + audit logs to Neon |
 | Embed | `embedder.py` | text-embedding-3-large vectors → chunk_embeddings (non-blocking) |
 
+**Post-batch stages** (run once after all files are processed, if any file completed):
+
+```
+[Community Detection] → [Community Summary Embeddings] → [GraphSAGE] → [TransE] → [Hybrid Chunk-Entity Embeddings]
+```
+
+| Stage | Module | Purpose |
+|-------|--------|---------|
+| Community Detection | `graph/community.py` | Leiden clustering + LLM summaries |
+| Community Summary Embeddings | `graph/community_embeddings.py` | Embed community summaries → Neon pgvector (512-dim) |
+| GraphSAGE | `graph/embeddings.py` | Structural entity embeddings → Neon pgvector (128-dim) |
+| TransE | `graph/transe.py` | Relation entity embeddings → Neon pgvector (128-dim) |
+| Hybrid Chunk-Entity Embeddings | `graph/hybrid_embeddings.py` | Combined text + graph embeddings → Neon pgvector (768-dim) |
+
+All post-batch stages are non-blocking — failures are logged but never crash the pipeline. See `docs/layer2_knowledge_graph.md` for details.
+
 ---
 
 ## 2. File Map
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `app/config.py` | 29 | All settings (LlamaParse, OpenAI, chunking params) |
+| `app/config.py` | 93 | All settings (LlamaParse, OpenAI, chunking, Neo4j, graph, embeddings, hybrid) |
 | `app/database.py` | 22 | Async connection pool (asyncpg, min=2, max=10) |
-| `app/ingestion/__init__.py` | 3 | Exports `ingest_file`, `ingest_files` |
-| `app/ingestion/parser.py` | 167 | LlamaParser class — parse files to markdown |
-| `app/ingestion/version_tracker.py` | 141 | VersionTracker class — dedup + versioning |
-| `app/ingestion/chunker.py` | 363 | 3-phase chunker + `save_chunks` DB writer |
-| `app/ingestion/enricher.py` | 154 | LLM enrichment with concurrency control |
-| `app/ingestion/embedder.py` | 60 | Chunk embedding generation (text-embedding-3-large) |
-| `app/ingestion/pipeline.py` | 245 | Orchestrator with retry loop + audit logging |
+| `app/ingestion/__init__.py` | 8 | Exports `ingest_file`, `ingest_files` |
+| `app/ingestion/parser.py` | 166 | LlamaParser class — parse files to markdown |
+| `app/ingestion/version_tracker.py` | 140 | VersionTracker class — dedup + versioning |
+| `app/ingestion/chunker.py` | 380 | 3-phase chunker + `save_chunks` DB writer |
+| `app/ingestion/enricher.py` | 153 | LLM enrichment with concurrency control |
+| `app/ingestion/embedder.py` | 99 | Chunk embedding generation (text-embedding-3-large) |
+| `app/ingestion/pipeline.py` | 342 | Orchestrator with retry loop + audit logging + post-batch graph embeddings |
 | `migrations/001_documents.sql` | 28 | Documents table + indexes |
 | `migrations/002_chunks.sql` | 23 | Chunks table + tsvector index |
 | `migrations/003_metadata_gin_index.sql` | 3 | GIN index on chunks.metadata |
 | `migrations/004_ingestion_logs.sql` | 16 | Ingestion audit log table |
-| `migrations/007_chunk_embeddings.sql` | 13 | Chunk embeddings table + HNSW index |
+| `migrations/005_chunk_content_hash.sql` | 2 | `content_hash` column + index on chunks (incremental change detection) |
+| `migrations/007_chunk_embeddings.sql` | 14 | Chunk embeddings table + HNSW index |
+| `migrations/010_hybrid_chunk_embeddings.sql` | 6 | `hybrid_embedding` vector(768) column + HNSW index on chunk_embeddings |
 
 ---
 
@@ -349,7 +367,7 @@ class EmbeddingResult:
 - `ingest_file(file_path) -> FileResult` — single file convenience wrapper
 - `ingest_files(file_paths) -> PipelineResult` — sequential batch processing
 
-**Retry loop** (`_ingest_one`):
+**Per-file retry loop** (`_ingest_one`):
 
 ```
 For attempt 1..3:
@@ -360,6 +378,7 @@ For attempt 1..3:
            - If is_new=False AND chunks exist → SKIPPED (true duplicate)
            - If is_new=False AND chunks=0 → orphan, continue
         3. Chunk document → list[Chunk]
+           3b. Change detection for incremental graph updates
         4. Enrich chunks → list[Chunk] (with metadata)
         5. Graph extract → entity/relationship extraction (non-blocking)
         6. Save chunks → list[UUID]
@@ -371,6 +390,19 @@ For attempt 1..3:
         If more attempts: sleep(2^attempt), retry
 Return FileResult(FAILED)
 ```
+
+**Post-batch processing** (`ingest_files`, after all files):
+
+```
+If any file completed:
+    1. Community Detection (Leiden clustering + LLM summaries)
+    2. Community Summary Embeddings (OpenAI → pgvector 512-dim)
+    3. GraphSAGE (structural entity embeddings → pgvector 128-dim)
+    4. TransE (relation entity embeddings → pgvector 128-dim)
+    5. Hybrid Chunk-Entity Embeddings (text + graph → pgvector 768-dim)
+```
+
+Each post-batch step is wrapped in its own try/except — failures are logged but never propagate.
 
 **Audit logging**: Every attempt creates a row in `ingestion_logs` with:
 - filename, attempt number, status, last step reached
@@ -455,19 +487,21 @@ class PipelineResult:
 - `idx_chunks_content_tsvector` — GIN on `to_tsvector('english', content)` (for BM25 keyword search)
 - `idx_chunks_metadata_gin` — GIN on `metadata` (migration 003, for metadata queries)
 
-### 4.3 `chunk_embeddings` (migration 007)
+### 4.3 `chunk_embeddings` (migrations 007, 010)
 
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | `id` | `UUID` | PK, `gen_random_uuid()` | Embedding UUID |
 | `chunk_id` | `UUID` | NOT NULL, FK → chunks(id) ON DELETE CASCADE | Parent chunk |
 | `embedding` | `vector(2000)` | NOT NULL | text-embedding-3-large vector |
+| `hybrid_embedding` | `vector(768)` | | Hybrid chunk-entity embedding (512 text + 128 GraphSAGE + 128 TransE) |
 | `model` | `TEXT` | NOT NULL, default `'text-embedding-3-large'` | Model used |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL, default `now()` | Creation time |
 
 **Indexes:**
 - `idx_chunk_emb_chunk_id` — UNIQUE on `chunk_id` (one embedding per chunk, upsert via ON CONFLICT)
 - `idx_chunk_emb_vector` — HNSW on `embedding vector_cosine_ops` (m=16, ef_construction=200)
+- `idx_chunk_emb_hybrid` — HNSW on `hybrid_embedding vector_cosine_ops` (m=16, ef_construction=64)
 
 **CASCADE behavior:** When chunks are deleted during re-ingestion (`DELETE FROM chunks WHERE document_id = $1`), embeddings are automatically deleted.
 
@@ -555,13 +589,27 @@ All settings from `app/config.py`:
       │                             │  chunks      │◄── embed_chunks ──┐    │ 5 concurrent    │
       │                             │  chunk_      │                   │    │ summary,        │
       │                             │  embeddings  │   ┌───────────┐   │    │ keywords, HyDE, │
-      │                             │  ingestion_  │   │  EMBEDDER │───┘    │ entities, type  │
-      │                             │    logs      │   │ text-emb- │        └─────────────────┘
-      │                             └──────────────┘   │ 3-large   │
-      │                                                │ 2000-dim  │
-      │                                                └───────────┘
-      │
-      │                             ┌──────────────┐
+      │                             │  entity_     │   │  EMBEDDER │───┘    │ entities, type  │
+      │                             │  embeddings  │   │ text-emb- │        └─────────────────┘
+      │                             │  relation_   │   │ 3-large   │
+      │                             │  embeddings  │   │ 2000-dim  │        ┌─────────────────┐
+      │                             │  community_  │   └───────────┘        │  GRAPH EXTRACT  │
+      │                             │  summary_    │                        │                 │
+      │                             │  embeddings  │◄── graph store ─────── │ GPT-4o per chunk│
+      │                             │  ingestion_  │                        │ coref + dedup   │
+      │                             │    logs      │                        │ → Neo4j MERGE   │
+      │                             └──────────────┘                        └─────────────────┘
+      │                                    ▲                                         │
+      │                                    │                                         ▼
+      │                             ┌──────────────┐                        ┌─────────────────┐
+      │                             │  NEO4J       │◄─── community IDs ──── │  POST-BATCH     │
+      │                             │              │                        │                 │
+      │                             │  Entity      │    ┌───────────────┐   │ 1. Community    │
+      │                             │  Community   │◄───│  GraphSAGE +  │   │ 2. Comm. Embeds │
+      │                             │  nodes       │    │  TransE       │   │ 3. GraphSAGE    │
+      │                             └──────────────┘    │  Hybrid       │──►│ 4. TransE       │
+      │                                                 └───────────────┘   │ 5. Hybrid       │
+      │                             ┌──────────────┐                        └─────────────────┘
       └────────────────────────────►│  LlamaParse  │
                                     │  Cloud API   │
                                     └──────────────┘
@@ -607,13 +655,14 @@ content_hash match found?
 
 ### Test files
 
-| File | Tests | Framework | Type |
-|------|-------|-----------|------|
-| `Test Cases/test_parser.py` | 1 | Script (manual) | Integration — parses real file via LlamaParse |
-| `Test Cases/test_chunker.py` | 3 | Script (manual) | Unit + Integration — blocks, chunking, DB round-trip |
-| `Test Cases/test_enricher.py` | 12 | pytest | Unit + Integration — classification, freshness, enrichment |
-| `Test Cases/test_pipeline.py` | 9 | pytest + pytest-asyncio | Unit — all pipeline paths with mocked deps |
-| `Test Cases/test_pipeline_e2e.py` | 1 | Script (manual) | E2E — full pipeline against real APIs + Neon DB |
+| File | Lines | Tests | Framework | Type |
+|------|-------|-------|-----------|------|
+| `Test Cases/test_parser.py` | 34 | 1 | Script (manual) | Integration — parses real file via LlamaParse |
+| `Test Cases/test_chunker.py` | 200 | 3 | Script (manual) | Unit + Integration — blocks, chunking, DB round-trip |
+| `Test Cases/test_enricher.py` | 218 | 12 | pytest | Unit + Integration — classification, freshness, enrichment |
+| `Test Cases/test_embedder.py` | 228 | 10 | pytest + pytest-asyncio | Unit — enriched text building, batching, upsert, error handling, pipeline integration |
+| `Test Cases/test_pipeline.py` | 253 | 9 | pytest + pytest-asyncio | Unit — all pipeline paths with mocked deps |
+| `Test Cases/test_pipeline_e2e.py` | 130 | 1 | Script (manual) | E2E — full pipeline against real APIs + Neon DB |
 
 ### Test scenarios
 
@@ -673,14 +722,18 @@ content_hash match found?
 | Embed | 1-5s | 1 API call for typical doc (< 2048 chunks), single batch |
 | **Total** | **~36-155s** | **Dominated by parse + enrich** |
 
-### API call counts (per document)
+### API call counts (per document, ingestion only)
 
 | Service | Calls | Details |
 |---------|-------|---------|
 | LlamaParse | 1 | One parse call per file (up to 3 retries) |
 | OpenAI (enrichment) | N | One per chunk (up to 3 retries each), skips tiny chunks |
 | OpenAI (embedding) | ceil(N/2048) | Batched embedding calls, typically 1 per document |
+| OpenAI (graph extraction) | N | One GPT-4o call per chunk for entity/relationship extraction |
 | Neon PostgreSQL | 3 + 2N | Hash check, version ops, N chunk inserts + N embedding upserts + log writes |
+| Neo4j | 2 + batch | Schema ensure, entity/relationship MERGE in batches of 100 |
+
+**Post-batch steps** (run once per batch, not per document): Community detection (Neo4j read + igraph + LLM summaries), community summary embeddings (1 OpenAI call), GraphSAGE (1 OpenAI call for features + CPU training), TransE (CPU training only), hybrid chunk-entity embeddings (Neon reads + writes only, no API calls).
 
 ### Bottlenecks
 
@@ -732,13 +785,21 @@ content_hash match found?
 - **`PARSE_TIMEOUT_SECONDS` not enforced**: The 300s timeout is defined but not applied as an actual timeout on the parse call.
 - **Enricher concurrency is global**: The semaphore bounds concurrent OpenAI calls per `enrich_chunks` invocation, not globally across multiple files.
 - **No chunk deduplication across documents**: If two different documents contain identical text, chunks are stored separately.
+- **Hybrid entity-chunk mapping V1**: Multi-document entities only enrich their first extraction chunk. Chunks in later documents won't get entity graph context from pre-existing entities. See Layer 2 docs for details.
 
-### Future Work (Later Phases)
-- **Neo4j entity graph** (Phase 2): Extract entities from enricher output, build knowledge graph.
-- **Parallel file ingestion**: Use `asyncio.gather` or a task queue for concurrent file processing.
-- **Webhook/SSE progress** (Phase 4): Stream pipeline status to API consumers.
-- **Chunk-level caching**: Skip re-enrichment if chunk content hasn't changed.
-- **Cost tracking**: Log LlamaParse and OpenAI API costs per ingestion.
+### Completed (Phases 1–2)
+- **Layer 1: Data Ingestion** — Parse, chunk, enrich, embed (this document)
+- **Layer 2: Knowledge Graph** — Neo4j entity graph, community detection, GraphSAGE, TransE, hybrid embeddings (see `docs/layer2_knowledge_graph.md`)
+
+### Future Work (Phases 3–6)
+- **Layer 3: Query Processing Engine** — Query classification, semantic cache, query decomposition
+- **Layer 4: Agentic Retrieval Engine** — LangGraph multi-agent (6 agents), hybrid vector+BM25+graph retrieval, Cohere Rerank 3
+- **Layer 5: Validation & Guardrails** — Parallel faithfulness/relevance/coherence checks (GPT-4o-mini)
+- **Layer 6: Evaluation & Observability** — RAGAS, LangSmith, online metrics, dashboards
+- **Layer 7: Stress Testing & Security** — Prompt injection defense, ACL, PII, rate limiting
+- **Parallel file ingestion**: Use `asyncio.gather` or a task queue for concurrent file processing
+- **Webhook/SSE progress**: Stream pipeline status to API consumers
+- **Cost tracking**: Log LlamaParse and OpenAI API costs per ingestion
 
 ---
 
@@ -751,16 +812,24 @@ content_hash match found?
 | `llama-cloud-services` | LlamaParse document parsing API client |
 | `python-dotenv` | Load `.env` file into environment |
 | `asyncpg` | Async PostgreSQL driver for Neon |
-| `openai` | AsyncOpenAI client for GPT-4o-mini enrichment |
+| `openai` | AsyncOpenAI client for GPT-4o/GPT-4o-mini/text-embedding-3-large |
 | `tiktoken` | Token counting (cl100k_base encoding) |
+| `neo4j` | Async Neo4j driver (knowledge graph) |
+| `fastcoref` | Coreference resolution (FCoref model) |
+| `transformers` | Required by fastcoref |
+| `rapidfuzz` | Fuzzy string matching for entity deduplication |
+| `leidenalg` | Leiden community detection algorithm |
+| `igraph` | Graph data structure for Leiden |
+| `torch` | GraphSAGE + TransE model training (CPU-only) |
 
 ### External Services
 
 | Service | Purpose | Config |
 |---------|---------|--------|
 | LlamaParse Cloud | Document parsing (agentic_plus tier) | `LLAMA_CLOUD_API_KEY` |
-| OpenAI API | Metadata enrichment (GPT-4o-mini) | `OPENAI_API_KEY` |
-| Neon PostgreSQL | Document + chunk storage | `DATABASE_URL` |
+| OpenAI API | GPT-4o extraction, GPT-4o-mini enrichment/summaries, text-embedding-3-large embeddings | `OPENAI_API_KEY` |
+| Neon PostgreSQL | Document, chunk, embedding storage (pgvector) | `DATABASE_URL` |
+| Neo4j | Knowledge graph storage (entities, relationships, communities) | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` |
 
 ### Dev/Test Dependencies (not in requirements.txt)
 
