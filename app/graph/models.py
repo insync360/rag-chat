@@ -51,3 +51,12 @@ class CommunityDetectionResult:
     total_communities: int
     skipped: bool = False
     error: str | None = None
+
+
+@dataclass
+class GraphEmbeddingResult:
+    entity_count: int
+    embedding_dim: int
+    skipped: bool = False
+    error: str | None = None
+    retrained: bool = False

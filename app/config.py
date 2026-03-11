@@ -44,6 +44,24 @@ class Settings:
     ENTITY_EMBEDDING_MODEL: str = "text-embedding-3-large"
     ENTITY_EMBEDDING_DIMENSIONS: int = 256      # reduced dims — entity names are short
 
+    # Graph embeddings (GraphSAGE)
+    GRAPH_EMBEDDINGS_ENABLED: bool = True
+    GRAPHSAGE_INPUT_DIM: int = 256        # OpenAI initial features dim
+    GRAPHSAGE_HIDDEN_DIM: int = 128
+    GRAPHSAGE_OUTPUT_DIM: int = 128       # structural embedding dim
+    GRAPHSAGE_NEIGHBOR_SAMPLES: int = 25  # K neighbors per node per layer
+    GRAPHSAGE_EPOCHS: int = 200
+    GRAPHSAGE_LR: float = 0.01
+    GRAPHSAGE_NEG_RATIO: int = 5         # negative samples per positive edge
+    GRAPHSAGE_BATCH_SIZE: int = 512       # edge batch size for training
+    GRAPHSAGE_SEED: int = 42
+    GRAPHSAGE_MODEL_DIR: str = "models"
+
+    # Chunk embeddings
+    CHUNK_EMBEDDING_MODEL: str = "text-embedding-3-large"
+    CHUNK_EMBEDDING_DIMENSIONS: int = 2000  # Neon pgvector HNSW limit (text-embedding-3-large supports reduced dims)
+    CHUNK_EMBEDDING_BATCH_SIZE: int = 2048
+
     # Community detection
     COMMUNITY_DETECTION_ENABLED: bool = True
     COMMUNITY_SUMMARY_ENABLED: bool = True

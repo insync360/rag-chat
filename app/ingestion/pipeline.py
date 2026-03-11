@@ -36,6 +36,7 @@ class StepTimings:
     enrich_ms: float = 0
     graph_extract_ms: float = 0
     save_ms: float = 0
+    embed_ms: float = 0
 
     def to_dict(self) -> dict:
         return {k: v for k, v in {
@@ -45,6 +46,7 @@ class StepTimings:
             "enrich_ms": self.enrich_ms,
             "graph_extract_ms": self.graph_extract_ms,
             "save_ms": self.save_ms,
+            "embed_ms": self.embed_ms,
         }.items() if v > 0}
 
 
@@ -209,6 +211,16 @@ async def _ingest_one(
             chunk_ids = await save_chunks(chunks)
             timings.save_ms = _ms_since(t)
 
+            # 7. Embed (non-blocking)
+            step = "embed"
+            t = time.perf_counter()
+            try:
+                from app.ingestion.embedder import embed_chunks
+                await embed_chunks(chunk_ids, chunks)
+            except Exception as embed_exc:
+                logger.warning("Chunk embedding failed for %s: %s", filename, embed_exc)
+            timings.embed_ms = _ms_since(t)
+
             await _log_update(
                 pool, log_id, status="completed", step="save",
                 document_id=record.id, chunk_count=len(chunk_ids),
@@ -272,6 +284,15 @@ async def ingest_files(file_paths: list[str | Path]) -> PipelineResult:
             logger.info("Community detection completed in %.1fms", community_ms)
         except Exception as exc:
             logger.warning("Post-batch community detection failed: %s", exc)
+
+        # Post-batch graph embeddings (after community detection)
+        try:
+            from app.graph.embeddings import generate_graph_embeddings
+            t = time.perf_counter()
+            await generate_graph_embeddings(force_retrain=True)
+            logger.info("Graph embeddings completed in %.1fms", _ms_since(t))
+        except Exception as exc:
+            logger.warning("Post-batch graph embeddings failed: %s", exc)
 
     total_ms = _ms_since(start)
     return PipelineResult(
