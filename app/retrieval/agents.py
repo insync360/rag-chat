@@ -220,6 +220,19 @@ async def calculator_agent(state: dict) -> dict:
         from app.retrieval.calculator import calculate
         query = state["original_query"]
         chunks = state.get("retrieved_chunks", [])
+
+        # Skip LLM call if no chunks contain digits
+        has_numbers = any(
+            any(ch.isdigit() for ch in c.content) for c in chunks[:10]
+        )
+        if not has_numbers:
+            elapsed = time.monotonic() - t0
+            return {
+                "calculation_result": None,
+                "step_timings": {"calculator": round(elapsed, 3)},
+                "errors": [],
+            }
+
         result = await _retry(calculate, query, chunks)
 
         elapsed = time.monotonic() - t0
@@ -260,6 +273,13 @@ async def summariser_agent(state: dict) -> dict:
                 seen_ids.add(c.chunk_id)
                 unique_chunks.append(c)
         chunks = unique_chunks
+
+        # Cap chunks for summariser context window
+        max_chunks = settings.SUMMARISER_MAX_CHUNKS
+        if len(chunks) > max_chunks:
+            chunks.sort(key=lambda c: c.score, reverse=True)
+            chunks = chunks[:max_chunks]
+
         calc_result = state.get("calculation_result")
 
         answer = await _retry(summarise_chunks, query, chunks, graph_paths, calc_result)

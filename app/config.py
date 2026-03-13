@@ -91,8 +91,8 @@ class Settings:
     HYBRID_CHUNK_TEXT_DIM: int = 512  # MRL truncation of 2000-dim chunk embedding
 
     # Retrieval engine
-    RETRIEVAL_TOP_K_VECTOR: int = 40
-    RETRIEVAL_TOP_K_BM25: int = 40
+    RETRIEVAL_TOP_K_VECTOR: int = 20
+    RETRIEVAL_TOP_K_BM25: int = 20
     RETRIEVAL_TOP_K_FINAL: int = 10
     RETRIEVAL_RRF_K: int = 60
     RETRIEVAL_USE_HYBRID_EMBEDDING: bool = True
@@ -103,8 +103,9 @@ class Settings:
 
     # Graph search
     GRAPH_SEARCH_MAX_HOPS: int = 2
-    GRAPH_SEARCH_TOP_K: int = 20
+    GRAPH_SEARCH_TOP_K: int = 10
     GRAPH_SEARCH_ENTITY_TOP_K: int = 5
+    GRAPH_SEARCH_MAX_PATHS: int = 30
 
     # Reranker (Cohere)
     COHERE_API_KEY: str = os.environ.get("COHERE_API_KEY", "")
@@ -118,14 +119,14 @@ class Settings:
     FRESHNESS_WEIGHT: float = 0.05
 
     # Summariser
-    SUMMARISER_MODEL: str = "gpt-5.4"
-    SUMMARISER_MAX_TOKENS: int = 4096
+    SUMMARISER_MODEL: str = "gpt-4o"
+    SUMMARISER_MAX_TOKENS: int = 2048
 
     # Calculator
-    CALCULATOR_MODEL: str = "gpt-5.4"
+    CALCULATOR_MODEL: str = "gpt-4o-mini"
 
     # Conflict resolution
-    CONFLICT_MODEL: str = "gpt-5.4"
+    CONFLICT_MODEL: str = "gpt-4o-mini"
 
     # Semantic cache
     CACHE_ENABLED: bool = True
@@ -137,6 +138,9 @@ class Settings:
     HYDE_ENABLED: bool = True
     HYDE_MODEL: str = "gpt-4o-mini"
     HYDE_MAX_TOKENS: int = 256
+
+    # Summariser chunk cap
+    SUMMARISER_MAX_CHUNKS: int = 10
 
     # Agent retry
     AGENT_MAX_RETRIES: int = 2

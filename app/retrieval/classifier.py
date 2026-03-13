@@ -40,6 +40,7 @@ Examples:
 - "Section 11(4)(a) states X. The proviso says Y. How do these interact?" → ANALYTICAL
 - "Compare the penalties in Chapter VII with the remedies in Chapter VIII" → ANALYTICAL
 - "Under what conditions can the authority revoke a registration?" → ANALYTICAL
+- "What are the promoter's obligations regarding insurance?" → ANALYTICAL
 - "What is the timeline for possession under Section 18?" → FILTERED
 
 Common mistakes to AVOID:
@@ -68,11 +69,13 @@ _ANALYTICAL_PATTERN = re.compile(
     r"|how\s+do\s+(?:these|they|the\s+\w+)\s+interact"
     r"|exhaustive|comprehensive\s+list"
     r"|contradiction|conflict\s+between"
+    r"|what\s+are\s+(?:the\s+)?(?:promoter'?s?|buyer'?s?|authority'?s?)\s+obligations"
+    r"|obligations?\s+(?:regarding|concerning|related\s+to|under)"
     r")\b",
     re.IGNORECASE,
 )
 _GRAPH_PATTERN = re.compile(
-    r"\b(relationship|connected|between|relate[sd]?|link|how does .+ (?:affect|impact|influence))\b",
+    r"\b(relationship|connected|relate[sd]?\s+to|link(?:ed|s)?\s+(?:to|with)|how does .+ (?:affect|impact|influence))\b",
     re.IGNORECASE,
 )
 _CONFLICT_PATTERN = re.compile(
@@ -146,7 +149,7 @@ async def classify_query(query: str) -> ExecutionPlan:
         query_type=query_type,
         activate_vector=True,
         activate_graph=query_type in (QueryType.GRAPH, QueryType.ANALYTICAL),
-        activate_calculator=query_type == QueryType.ANALYTICAL,
+        activate_calculator=bool(_CALC_PATTERN.search(query)),
         activate_conflict=True,
         metadata_filters=filters,
         expanded_queries=expanded,

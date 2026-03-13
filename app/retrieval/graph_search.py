@@ -159,6 +159,14 @@ async def _traverse_graph(
                 confidence=r["hop_weight"],
             ))
 
+    # Hard limit on paths to prevent traversal runaway
+    max_paths = settings.GRAPH_SEARCH_MAX_PATHS
+    if len(paths) > max_paths:
+        paths.sort(key=lambda p: p.confidence, reverse=True)
+        paths = paths[:max_paths]
+        retained = {name for p in paths for name in p.entities}
+        related = [r for r in related if r["name"] in retained]
+
     return related, paths
 
 

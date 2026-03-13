@@ -32,9 +32,9 @@ Query → [Embed 256-dim] → [Cache Check] → [LangGraph] → [Cache Store] �
 | Planner | `classifier.py` | Classify query type, expand queries, extract metadata filters |
 | Vector | `vector_search.py` + `reranker.py` | Hybrid vector+BM25 search, RRF fusion, Cohere rerank, freshness boost |
 | Graph | `graph_search.py` | Entity embedding match, Neo4j traversal (2 hops), chunk resolution |
-| Conflict | `conflict.py` | Contradiction detection via GPT-5.4, credibility-based resolution |
+| Conflict | `conflict.py` | Contradiction detection via GPT-4o-mini, credibility-based resolution |
 | Calculator | `calculator.py` | Structured number extraction + safe arithmetic (no eval/exec) |
-| Summariser | `summariser.py` | Compress chunks into cited answer via GPT-5.4 |
+| Summariser | `summariser.py` | Compress chunks into cited answer via GPT-4o |
 
 ---
 
@@ -96,7 +96,7 @@ Query → [Embed 256-dim] → [Cache Check] → [LangGraph] → [Cache Store] �
 | SIMPLE | Yes | No | No | Yes | Yes |
 | FILTERED | Yes (with filters) | No | No | Yes | Yes |
 | GRAPH | Yes | Yes (parallel) | No | Yes | Yes |
-| ANALYTICAL | Yes | Yes (parallel) | Yes | Yes | Yes |
+| ANALYTICAL | Yes | Yes (parallel) | Only if `_CALC_PATTERN` matches | Yes | Yes |
 
 ---
 
@@ -106,15 +106,15 @@ Query → [Embed 256-dim] → [Cache Check] → [LangGraph] → [Cache Store] �
 |------|-------|---------|
 | `app/retrieval/__init__.py` | 125 | `query()` entry point — cache check, LangGraph invoke, cache store, query logging |
 | `app/retrieval/models.py` | 68 | Dataclasses: QueryType, RetrievedChunk, GraphPath, ConflictResolution, ExecutionPlan, QueryResult |
-| `app/retrieval/classifier.py` | 107 | Query classification — heuristic regex + GPT-5.4 LLM fallback |
+| `app/retrieval/classifier.py` | 165 | Query classification — heuristic regex + GPT-5.4 LLM fallback |
 | `app/retrieval/cache.py` | 108 | Semantic cache — check + store via 256-dim cosine similarity |
 | `app/retrieval/vector_search.py` | 242 | Query embedding, HNSW vector search, BM25 tsvector search, RRF fusion |
-| `app/retrieval/graph_search.py` | 309 | Entity embedding match, Neo4j 2-hop traversal, chunk resolution |
+| `app/retrieval/graph_search.py` | 320 | Entity embedding match, Neo4j 2-hop traversal, path cap, chunk resolution |
 | `app/retrieval/reranker.py` | 80 | Cohere Rerank v3.5 cross-encoder + freshness boost |
-| `app/retrieval/summariser.py` | 95 | Compress chunks into cited answer via GPT-5.4 |
+| `app/retrieval/summariser.py` | 95 | Compress chunks into cited answer via GPT-4o |
 | `app/retrieval/calculator.py` | 94 | Structured number extraction + safe arithmetic |
 | `app/retrieval/conflict.py` | 115 | Contradiction detection + credibility-based resolution |
-| `app/retrieval/agents.py` | 255 | Six agent node functions (async state -> dict) with retry wrapper |
+| `app/retrieval/agents.py` | 304 | Six agent node functions (async state -> dict) with retry wrapper, calculator pre-check, summariser chunk cap |
 | `app/retrieval/graph_builder.py` | 139 | LangGraph StateGraph wiring — conditional routing + parallel fan-out |
 | `migrations/011_semantic_cache.sql` | 17 | `semantic_cache` table + HNSW + expiry index |
 | `migrations/012_query_logs.sql` | 18 | `query_logs` table + indexes |
@@ -147,7 +147,7 @@ Query → [Embed 256-dim] → [Cache Check] → [LangGraph] → [Cache Store] �
 
 **Behavior**: Vector and graph agents run in parallel via LangGraph fan-out. Graph agent finds seed entities via embedding similarity, traverses Neo4j up to 2 hops, resolves to chunks. Results from both agents are merged via `operator.add` reducer on `retrieved_chunks`.
 
-**Heuristic shortcut**: Regex pattern `\b(relationship|connected|between|relate[sd]?|link|how does .+ (?:affect|impact|influence))\b` bypasses LLM classification.
+**Heuristic shortcut**: Regex pattern `\b(relationship|connected|relate[sd]?\s+to|link(?:ed|s)?\s+(?:to|with)|how does .+ (?:affect|impact|influence))\b` bypasses LLM classification. Bare "between" removed to reduce false positives.
 
 ### ANALYTICAL — multi-hop, aggregation, arithmetic
 
@@ -173,7 +173,7 @@ Two parallel search paths fused via Reciprocal Rank Fusion (RRF):
 - **Query embedding**: 2000-dim from `text-embedding-3-large`, truncated to 512-dim via MRL, zero-padded to 768-dim (512 text + 128 zero GraphSAGE + 128 zero TransE), L2-normalized
 - **Similarity**: `1 - (hybrid_embedding <=> query::vector)` (cosine distance)
 - **Filters**: Active documents only (`d.status = 'active'`), optional `document_id` or `filename ILIKE` filter
-- **Top-K**: `RETRIEVAL_TOP_K_VECTOR` (40)
+- **Top-K**: `RETRIEVAL_TOP_K_VECTOR` (20)
 
 ### BM25 Search (tsvector)
 
@@ -181,7 +181,7 @@ Two parallel search paths fused via Reciprocal Rank Fusion (RRF):
 - **Ranking**: `ts_rank_cd` with normalization flag 32 (divides by document length)
 - **Query**: `plainto_tsquery('english', $1)` — automatic stemming and stop-word removal
 - **Filters**: Same active document + metadata filters as vector search
-- **Top-K**: `RETRIEVAL_TOP_K_BM25` (40)
+- **Top-K**: `RETRIEVAL_TOP_K_BM25` (20)
 
 ### RRF Fusion
 
@@ -217,6 +217,7 @@ Three-step pipeline: entity match -> Neo4j traversal -> chunk resolution.
 - Cypher: `MATCH (e)-[r*1..2]-(related:Entity {status: 'active'})` — variable-length 1-2 hop traversal from seed entities
 - **Hop weighting**: 1-hop = 1.0, 2-hop = 0.5 confidence
 - Deduplicates `(seed_name, related_name)` pairs
+- **Hard path cap**: Paths sorted by confidence desc, truncated to `GRAPH_SEARCH_MAX_PATHS` (30). Related entities not in retained paths are pruned.
 - Returns related entities + `GraphPath` objects with entity names, relationship types, confidence
 
 ### Step 3 — Chunk Resolution
@@ -308,7 +309,7 @@ Stored as `(query_text, query_embedding, query_type, answer, result_json, expire
 
 ### Detection
 
-GPT-5.4 (`CONFLICT_MODEL`) analyzes up to 10 chunks (600 chars each) for contradictory claims. Returns pairs of `(chunk_a_id, chunk_b_id, claim_a, claim_b)`.
+GPT-4o-mini (`CONFLICT_MODEL`) analyzes up to 10 chunks (600 chars each) for contradictory claims. Returns pairs of `(chunk_a_id, chunk_b_id, claim_a, claim_b)`.
 
 ### Credibility Hierarchy
 
@@ -341,11 +342,11 @@ class ConflictResolution:
 
 ### Design
 
-No `eval()` or `exec()` — numbers and operation are extracted by GPT-5.4 (`CALCULATOR_MODEL`) as structured JSON, then dispatched to whitelisted Python functions.
+No `eval()` or `exec()` — numbers and operation are extracted by GPT-4o-mini (`CALCULATOR_MODEL`) as structured JSON, then dispatched to whitelisted Python functions.
 
 ### Extraction Prompt
 
-GPT-5.4 returns JSON with:
+GPT-4o-mini returns JSON with:
 - `numbers`: array of floats from the context
 - `operation`: one of 8 allowed operations
 - `context`: description of what the numbers represent
@@ -399,8 +400,8 @@ All settings from `app/config.py`:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `RETRIEVAL_TOP_K_VECTOR` | `40` | Vector search top-K (pre-fusion) |
-| `RETRIEVAL_TOP_K_BM25` | `40` | BM25 search top-K (pre-fusion) |
+| `RETRIEVAL_TOP_K_VECTOR` | `20` | Vector search top-K (pre-fusion) |
+| `RETRIEVAL_TOP_K_BM25` | `20` | BM25 search top-K (pre-fusion) |
 | `RETRIEVAL_TOP_K_FINAL` | `10` | Final top-K after RRF fusion |
 | `RETRIEVAL_RRF_K` | `60` | RRF constant k |
 | `RETRIEVAL_USE_HYBRID_EMBEDDING` | `True` | Use 768-dim hybrid vs 2000-dim text embedding |
@@ -416,8 +417,9 @@ All settings from `app/config.py`:
 | Setting | Default | Purpose |
 |---------|---------|---------|
 | `GRAPH_SEARCH_MAX_HOPS` | `2` | Max Neo4j traversal depth |
-| `GRAPH_SEARCH_TOP_K` | `20` | Max chunks from graph search |
+| `GRAPH_SEARCH_TOP_K` | `10` | Max chunks from graph search |
 | `GRAPH_SEARCH_ENTITY_TOP_K` | `5` | Max seed entities from embedding match |
+| `GRAPH_SEARCH_MAX_PATHS` | `30` | Hard cap on graph traversal paths |
 
 ### Reranker (Cohere)
 
@@ -440,20 +442,21 @@ All settings from `app/config.py`:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `SUMMARISER_MODEL` | `gpt-5.4` | LLM for answer synthesis |
-| `SUMMARISER_MAX_TOKENS` | `4096` | Max output tokens |
+| `SUMMARISER_MODEL` | `gpt-4o` | LLM for answer synthesis |
+| `SUMMARISER_MAX_TOKENS` | `2048` | Max output tokens |
+| `SUMMARISER_MAX_CHUNKS` | `10` | Max chunks passed to summariser |
 
 ### Calculator
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `CALCULATOR_MODEL` | `gpt-5.4` | LLM for number/operation extraction |
+| `CALCULATOR_MODEL` | `gpt-4o-mini` | LLM for number/operation extraction |
 
 ### Conflict Resolution
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `CONFLICT_MODEL` | `gpt-5.4` | LLM for contradiction detection |
+| `CONFLICT_MODEL` | `gpt-4o-mini` | LLM for contradiction detection |
 
 ### Semantic Cache
 
@@ -537,7 +540,7 @@ All settings from `app/config.py`:
 
 | Service | Purpose | Config |
 |---------|---------|--------|
-| OpenAI API | GPT-5.4 (classification, summarisation, conflict, calculator), text-embedding-3-large (query embeddings) | `OPENAI_API_KEY` |
+| OpenAI API | GPT-5.4 (classification), GPT-4o (summarisation), GPT-4o-mini (conflict, calculator, HyDE), text-embedding-3-large (query embeddings) | `OPENAI_API_KEY` |
 | Cohere API | Rerank v3.5 cross-encoder | `COHERE_API_KEY` |
 | Neon PostgreSQL | Vector search (HNSW), BM25 (tsvector), semantic cache, query logs | `DATABASE_URL` |
 | Neo4j | Entity embedding search, graph traversal | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` |
@@ -702,3 +705,41 @@ Post-evaluation fixes addressing 5 failure modes across 10 test queries (Q8 and 
 - Lettered sub-clauses (a),(b),(c) kept together, up to 1.5x max_tokens overflow
 - Sibling sub-sections (shared parent path) get doubled overlap (24% vs 12%)
 - Heading-only trailing chunks merged into previous chunk
+
+---
+
+## Evaluation Fixes (v2 — Round 2)
+
+Post-remediation fixes addressing 6 failure modes found in Q8/Q9/Q10 re-testing.
+
+### Graph Traversal Hard Limits
+- `GRAPH_SEARCH_MAX_PATHS` (30) caps paths in `_traverse_graph()` — sorted by confidence desc, pruned
+- `GRAPH_SEARCH_TOP_K` reduced from 20 → 10 chunks — prevents graph over-retrieval
+- Prevents 170-198 path runaway observed in ANALYTICAL queries
+
+### Calculator Relevance Gate
+- `activate_calculator` now gated by `_CALC_PATTERN` regex (requires numerical language + digits), not all ANALYTICAL queries
+- Calculator agent pre-checks: skips GPT call if no chunks contain digits
+- Eliminates ~4s GPT-5.4 call on non-numerical queries like "What are all the legal remedies..."
+
+### Model Speed Optimization
+- Summariser: GPT-5.4 → GPT-4o (3x faster, adequate quality for synthesis)
+- Calculator: GPT-5.4 → GPT-4o-mini (extraction task, speed critical)
+- Conflict: GPT-5.4 → GPT-4o-mini (classification task, speed critical)
+- Classifier kept at GPT-5.4 — routing accuracy is critical
+- Expected total latency: ~8-12s (down from 28-46s)
+
+### Over-Retrieval Cap
+- `SUMMARISER_MAX_CHUNKS` (10) caps chunks passed to summariser (sorted by score)
+- `RETRIEVAL_TOP_K_VECTOR` and `RETRIEVAL_TOP_K_BM25` reduced from 40 → 20 (RRF still effective)
+- Prevents 30-40 chunk accumulation from vector + graph + multi-pass
+
+### Classifier Refinement
+- `_ANALYTICAL_PATTERN` expanded with obligation/duty/insurance patterns
+- `_GRAPH_PATTERN` tightened: removed bare "between" (too many false positives)
+- Added few-shot example: "What are the promoter's obligations regarding insurance?" → ANALYTICAL
+- Fixes Q9 misclassification (GRAPH → ANALYTICAL)
+
+### Ingestion Gap Diagnosis (Fix 6)
+- Sections 11, 12, 16 confirmed present in corpus (3 chunks, all with hybrid embeddings)
+- No re-ingestion needed — retrieval-only fixes sufficient
