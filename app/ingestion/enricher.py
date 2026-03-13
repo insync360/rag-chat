@@ -26,9 +26,24 @@ class ChunkType(str, Enum):
     CODE = "CODE"
     HEADING = "HEADING"
     LIST = "LIST"
+    INDEX = "INDEX"
+    DEFINITION = "DEFINITION"
 
 
 _LIST_RE = re.compile(r"^[\s]*([-*+]|\d+[.)]) ", re.MULTILINE)
+_SECTION_REF_RE = re.compile(r"\b(?:Section|Chapter|Part|Schedule|Clause)\s+\d+", re.IGNORECASE)
+_DOT_LEADER_RE = re.compile(r"\.{3,}")
+_DEFINITION_START_RE = re.compile(
+    r"(?:^|\n)\s*(?:"
+    r"Explanation[\s.:—\-]|"
+    r"Provided\s+that\b|"
+    r"Proviso[\s.:—\-]|"
+    r"For\s+the\s+purposes?\s+of\s+(?:this|the)\b|"
+    r"\"[A-Za-z\s]+\"\s+(?:means?|includes?|shall\s+mean)|"
+    r"hereinafter\s+(?:referred|called)\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _classify_chunk_type(chunk: Chunk) -> ChunkType:
@@ -37,8 +52,24 @@ def _classify_chunk_type(chunk: Chunk) -> ChunkType:
     if chunk.has_code:
         return ChunkType.CODE
     content = chunk.content.strip()
+
+    # HEADING: starts with # and is very short
     if content.startswith("#") and _token_count(content) < 20:
         return ChunkType.HEADING
+
+    # INDEX: table-of-contents / section listings (3+ section refs + structural markers)
+    section_refs = len(_SECTION_REF_RE.findall(content))
+    if section_refs >= 3:
+        has_dot_leaders = bool(_DOT_LEADER_RE.search(content))
+        lines = content.split("\n")
+        short_line_ratio = sum(1 for l in lines if len(l.strip()) < 60) / max(len(lines), 1)
+        if has_dot_leaders or short_line_ratio > 0.7:
+            return ChunkType.INDEX
+
+    # DEFINITION: explanation clauses, provisos, defined terms
+    if _DEFINITION_START_RE.search(content):
+        return ChunkType.DEFINITION
+
     lines = content.split("\n")
     list_lines = sum(1 for line in lines if _LIST_RE.match(line))
     if lines and list_lines / len(lines) > 0.5:

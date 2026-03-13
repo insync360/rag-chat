@@ -24,6 +24,7 @@ class Settings:
     CHUNK_MIN_TOKENS: int = 256
     CHUNK_MAX_TOKENS: int = 512
     CHUNK_OVERLAP_PERCENT: float = 0.12  # 12% overlap
+    CHUNK_ENUMERATION_OVERFLOW: float = 1.5  # allow up to 1.5x max_tokens mid-enumeration
 
     # Neo4j
     NEO4J_URI: str = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
@@ -88,6 +89,64 @@ class Settings:
     # Hybrid chunk-entity embeddings
     HYBRID_CHUNK_ENTITY_ENABLED: bool = True
     HYBRID_CHUNK_TEXT_DIM: int = 512  # MRL truncation of 2000-dim chunk embedding
+
+    # Retrieval engine
+    RETRIEVAL_TOP_K_VECTOR: int = 40
+    RETRIEVAL_TOP_K_BM25: int = 40
+    RETRIEVAL_TOP_K_FINAL: int = 10
+    RETRIEVAL_RRF_K: int = 60
+    RETRIEVAL_USE_HYBRID_EMBEDDING: bool = True
+    RETRIEVAL_EXCLUDE_CHUNK_TYPES: list[str] = ["HEADING", "INDEX"]
+
+    # Query classification
+    QUERY_CLASSIFIER_MODEL: str = "gpt-5.4"
+
+    # Graph search
+    GRAPH_SEARCH_MAX_HOPS: int = 2
+    GRAPH_SEARCH_TOP_K: int = 20
+    GRAPH_SEARCH_ENTITY_TOP_K: int = 5
+
+    # Reranker (Cohere)
+    COHERE_API_KEY: str = os.environ.get("COHERE_API_KEY", "")
+    RERANK_MODEL: str = "rerank-v3.5"
+    RERANK_TOP_N: int = 10
+    RERANK_ENABLED: bool = True
+
+    # Freshness
+    FRESHNESS_BOOST_ENABLED: bool = True
+    FRESHNESS_DECAY_DAYS: int = 365
+    FRESHNESS_WEIGHT: float = 0.05
+
+    # Summariser
+    SUMMARISER_MODEL: str = "gpt-5.4"
+    SUMMARISER_MAX_TOKENS: int = 4096
+
+    # Calculator
+    CALCULATOR_MODEL: str = "gpt-5.4"
+
+    # Conflict resolution
+    CONFLICT_MODEL: str = "gpt-5.4"
+
+    # Semantic cache
+    CACHE_ENABLED: bool = True
+    CACHE_SIMILARITY_THRESHOLD: float = 0.95
+    CACHE_TTL_HOURS: int = 24
+    CACHE_EMBEDDING_DIM: int = 256
+
+    # HyDE (Hypothetical Document Embeddings)
+    HYDE_ENABLED: bool = True
+    HYDE_MODEL: str = "gpt-4o-mini"
+    HYDE_MAX_TOKENS: int = 256
+
+    # Agent retry
+    AGENT_MAX_RETRIES: int = 2
+    AGENT_RETRY_BASE_MS: int = 500
+
+    # Coverage check
+    COVERAGE_CHECK_ENABLED: bool = True
+    MAX_RETRIEVAL_PASSES: int = 2
+    COVERAGE_MIN_CHUNKS_SIMPLE: int = 2
+    COVERAGE_MIN_CHUNKS_ANALYTICAL: int = 3
 
 
 settings = Settings()

@@ -129,6 +129,7 @@ def _parse_blocks(markdown: str) -> list[Block]:
 # ---------------------------------------------------------------------------
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+_ENUM_SUBCLAUSE_RE = re.compile(r"^\s*(?:\([a-z]\)|\([ivx]+\)|\([A-Z]\))")
 
 
 def _split_paragraph(text: str, max_tokens: int) -> list[str]:
@@ -160,6 +161,7 @@ class _RawChunk:
     has_table: bool = False
     has_code: bool = False
     has_body: bool = False  # True once non-heading content is added
+    in_enumeration: bool = False  # True while accumulating lettered sub-clauses
 
 
 def _group_blocks(blocks: list[Block], document_id: str) -> list[Chunk]:
@@ -233,9 +235,13 @@ def _group_blocks(blocks: list[Block], document_id: str) -> list[Chunk]:
                 current.has_code = True
             continue
 
-        # Paragraph
-        if block_tokens > max_tok:
-            # Long paragraph — flush current, then split at sentences
+        # Paragraph — with enumeration awareness
+        is_enum = bool(_ENUM_SUBCLAUSE_RE.match(block.content.lstrip()))
+        overflow_max = int(max_tok * settings.CHUNK_ENUMERATION_OVERFLOW) if (current.in_enumeration or is_enum) else max_tok
+
+        if block_tokens > max_tok and not is_enum:
+            # Long non-enumeration paragraph — flush current, then split at sentences
+            current.in_enumeration = False
             flush()
             for piece in _split_paragraph(block.content, max_tok):
                 current.parts.append(piece)
@@ -244,14 +250,44 @@ def _group_blocks(blocks: list[Block], document_id: str) -> list[Chunk]:
                 flush()
             continue
 
-        if current.tokens + block_tokens > max_tok:
-            flush()
+        if current.tokens + block_tokens > overflow_max:
+            if not current.in_enumeration or not is_enum:
+                current.in_enumeration = False
+                flush()
 
         current.parts.append(block.content)
         current.tokens += block_tokens
         current.has_body = True
+        if is_enum:
+            current.in_enumeration = True
+        elif not _ENUM_SUBCLAUSE_RE.match(block.content.lstrip()):
+            current.in_enumeration = False
 
     flush()
+
+    # Post-loop: merge heading-only trailing chunk into previous
+    if len(chunks) >= 2:
+        last = chunks[-1]
+        has_body_content = any(
+            line.strip() and not _HEADING_RE.match(line)
+            for line in last.content.split("\n")
+        )
+        if not has_body_content:
+            prev = chunks[-2]
+            merged_content = prev.content + "\n\n" + last.content
+            chunks[-2] = Chunk(
+                document_id=prev.document_id,
+                chunk_index=prev.chunk_index,
+                content=merged_content,
+                token_count=_token_count(merged_content),
+                section_path=last.section_path,
+                has_table=prev.has_table,
+                has_code=prev.has_code,
+                overlap_tokens=prev.overlap_tokens,
+                metadata=prev.metadata,
+            )
+            chunks.pop()
+
     return chunks
 
 
@@ -281,7 +317,16 @@ def _apply_overlap(chunks: list[Chunk]) -> list[Chunk]:
 
     for i in range(1, len(chunks)):
         prev = chunks[i - 1]
-        max_overlap_tokens = int(prev.token_count * overlap_pct)
+        # Double overlap for consecutive chunks under the same parent section
+        prev_path = prev.section_path
+        curr_path = chunks[i].section_path
+        shared_parent = (
+            prev_path and curr_path
+            and prev_path.rsplit(" > ", 1)[0] == curr_path.rsplit(" > ", 1)[0]
+            and " > " in prev_path and " > " in curr_path
+        )
+        effective_pct = overlap_pct * 2 if shared_parent else overlap_pct
+        max_overlap_tokens = int(prev.token_count * effective_pct)
         if max_overlap_tokens < 1:
             continue
 
