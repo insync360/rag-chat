@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -75,6 +75,8 @@ class DocumentOut(BaseModel):
     page_count: int | None
     ingested_at: str
     chunk_count: int
+    category_id: str | None
+    category_name: str | None
 
 
 class FileResultOut(BaseModel):
@@ -114,6 +116,16 @@ class ConversationCreate(BaseModel):
 
 class ConversationUpdate(BaseModel):
     title: str
+
+
+class CategoryOut(BaseModel):
+    id: str
+    name: str
+    document_count: int
+
+
+class CategoryCreate(BaseModel):
+    name: str
 
 
 # ── Endpoints ────────────────────────────────────────────────────────
@@ -277,11 +289,18 @@ async def api_delete_conversation(conv_id: str):
 
 
 @app.post("/api/upload", response_model=UploadResponse)
-async def api_upload(files: list[UploadFile]):
+async def api_upload(files: list[UploadFile], category_id: str = Form(...)):
     from app.ingestion.pipeline import ingest_files
 
     if not files:
         raise HTTPException(400, "No files provided")
+
+    pool = await get_pool()
+    cat_row = await pool.fetchrow(
+        "SELECT id FROM categories WHERE id = $1::uuid", uuid.UUID(category_id),
+    )
+    if not cat_row:
+        raise HTTPException(400, "Category not found")
 
     saved_paths: list[Path] = []
     for f in files:
@@ -298,6 +317,14 @@ async def api_upload(files: list[UploadFile]):
     finally:
         for p in saved_paths:
             p.unlink(missing_ok=True)
+
+    # Stamp category on completed documents
+    for fr in result.files:
+        if fr.status.value == "completed" and fr.document_id:
+            await pool.execute(
+                "UPDATE documents SET category_id = $1::uuid WHERE id = $2::uuid",
+                uuid.UUID(category_id), uuid.UUID(fr.document_id),
+            )
 
     return UploadResponse(
         total=result.total,
@@ -322,11 +349,13 @@ async def api_documents():
     rows = await pool.fetch(
         """
         SELECT d.id, d.filename, d.version, d.page_count, d.ingested_at,
+               d.category_id, cat.name AS category_name,
                COUNT(c.id) AS chunk_count
         FROM documents d
         LEFT JOIN chunks c ON c.document_id = d.id
+        LEFT JOIN categories cat ON cat.id = d.category_id
         WHERE d.status = 'active'
-        GROUP BY d.id
+        GROUP BY d.id, cat.name
         ORDER BY d.ingested_at DESC
         """
     )
@@ -338,9 +367,68 @@ async def api_documents():
             page_count=r["page_count"],
             ingested_at=r["ingested_at"].isoformat() if r["ingested_at"] else "",
             chunk_count=r["chunk_count"],
+            category_id=str(r["category_id"]) if r["category_id"] else None,
+            category_name=r["category_name"],
         )
         for r in rows
     ]
+
+
+# ── Category endpoints ─────────────────────────────────────────────
+
+@app.get("/api/categories", response_model=list[CategoryOut])
+async def api_list_categories():
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT cat.id, cat.name,
+               COUNT(d.id) FILTER (WHERE d.status = 'active') AS document_count
+        FROM categories cat
+        LEFT JOIN documents d ON d.category_id = cat.id
+        GROUP BY cat.id
+        ORDER BY cat.name
+        """
+    )
+    return [
+        CategoryOut(
+            id=str(r["id"]),
+            name=r["name"],
+            document_count=r["document_count"],
+        )
+        for r in rows
+    ]
+
+
+@app.post("/api/categories", response_model=CategoryOut, status_code=201)
+async def api_create_category(body: CategoryCreate):
+    pool = await get_pool()
+    existing = await pool.fetchrow(
+        "SELECT id FROM categories WHERE name = $1", body.name,
+    )
+    if existing:
+        raise HTTPException(409, "Category already exists")
+    row = await pool.fetchrow(
+        "INSERT INTO categories (name) VALUES ($1) RETURNING id, name",
+        body.name,
+    )
+    return CategoryOut(id=str(row["id"]), name=row["name"], document_count=0)
+
+
+@app.delete("/api/categories/{cat_id}", status_code=204)
+async def api_delete_category(cat_id: str):
+    pool = await get_pool()
+    doc_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM documents WHERE category_id = $1::uuid AND status = 'active'",
+        uuid.UUID(cat_id),
+    )
+    if doc_count > 0:
+        raise HTTPException(409, f"Category has {doc_count} active document(s) — remove them first")
+    result = await pool.execute(
+        "DELETE FROM categories WHERE id = $1::uuid", uuid.UUID(cat_id),
+    )
+    if result == "DELETE 0":
+        raise HTTPException(404, "Category not found")
+    return Response(status_code=204)
 
 
 @app.delete("/api/documents/{doc_id}", status_code=204)
