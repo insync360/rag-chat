@@ -178,6 +178,7 @@ async def _resolve_to_chunks(
     entity_data: list[dict],
     seed_entity_names: list[str],
     top_k: int,
+    category_ids: list[str] | None = None,
 ) -> list[RetrievedChunk]:
     """Map entities to chunks via (document_id, chunk_index)."""
     pool = await get_pool()
@@ -221,8 +222,15 @@ async def _resolve_to_chunks(
     chunk_indices = [p[1] for p in pairs]
 
     exclude_types = settings.RETRIEVAL_EXCLUDE_CHUNK_TYPES  # ["HEADING", "INDEX"]
+
+    cat_clause = ""
+    params: list = [doc_ids, chunk_indices, top_k, exclude_types]
+    if category_ids:
+        cat_clause = f"AND d.category_id = ANY(${len(params) + 1}::uuid[])"
+        params.append(category_ids)
+
     rows = await pool.fetch(
-        """
+        f"""
         SELECT c.id::text AS chunk_id, c.document_id::text, c.content,
                c.section_path, c.metadata, c.chunk_index,
                d.filename, d.version, d.ingested_at
@@ -233,9 +241,10 @@ async def _resolve_to_chunks(
               SELECT unnest($1::text[]), unnest($2::int[])
           )
           AND COALESCE(c.metadata->>'chunk_type', 'PARAGRAPH') != ALL($4::text[])
+          {cat_clause}
         LIMIT $3
         """,
-        doc_ids, chunk_indices, top_k, exclude_types,
+        *params,
     )
 
     # Weight by hop distance
@@ -272,6 +281,7 @@ async def graph_search(
     query_embedding_256: list[float],
     max_hops: int | None = None,
     top_k: int | None = None,
+    category_ids: list[str] | None = None,
 ) -> tuple[list[RetrievedChunk], list[GraphPath]]:
     """Entity match → Neo4j traverse → chunk retrieval. Never raises."""
     max_hops = max_hops or settings.GRAPH_SEARCH_MAX_HOPS
@@ -338,7 +348,7 @@ async def graph_search(
         related_entities, graph_paths = await _traverse_graph(seed_names, max_hops)
 
         # Step 3 — Resolve to chunks
-        chunks = await _resolve_to_chunks(related_entities, seed_names, top_k)
+        chunks = await _resolve_to_chunks(related_entities, seed_names, top_k, category_ids)
 
         # Attach chunk IDs to graph paths
         chunk_ids_set = {c.chunk_id for c in chunks}

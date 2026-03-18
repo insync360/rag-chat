@@ -52,6 +52,9 @@ class GraphState(TypedDict):
     query_embedding_768: list[float] | None
     # Conversation history — passthrough, only read by summariser
     conversation_history: list[dict]
+    # Agent scope — category filtering + custom system prompt
+    category_ids: list[str] | None
+    agent_system_prompt: str | None
 
 
 # ---------------------------------------------------------------------------

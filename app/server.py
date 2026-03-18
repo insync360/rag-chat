@@ -128,6 +128,42 @@ class CategoryCreate(BaseModel):
     name: str
 
 
+class AgentCreate(BaseModel):
+    name: str
+    description: str = ""
+    system_prompt: str = ""
+    category_ids: list[str] = []
+
+
+class AgentUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    system_prompt: str | None = None
+    is_active: bool | None = None
+    category_ids: list[str] | None = None
+
+
+class AgentCategoryOut(BaseModel):
+    id: str
+    name: str
+
+
+class AgentOut(BaseModel):
+    id: str
+    name: str
+    description: str
+    system_prompt: str
+    model: str
+    is_active: bool
+    categories: list[AgentCategoryOut]
+    endpoint: str
+
+
+class AgentChatRequest(BaseModel):
+    query: str
+    conversation_id: str | None = None
+
+
 # ── Endpoints ────────────────────────────────────────────────────────
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -443,6 +479,204 @@ async def api_transcribe(audio: UploadFile):
         file=("audio.webm", audio_bytes, audio.content_type or "audio/webm"),
     )
     return {"text": result.text}
+
+
+# ── Agent endpoints ────────────────────────────────────────────────
+
+async def _load_agent(pool, agent_id: str) -> dict:
+    """Load agent + categories. Raises HTTPException(404) if not found."""
+    row = await pool.fetchrow(
+        "SELECT id, name, description, system_prompt, model, is_active FROM agents WHERE id = $1::uuid",
+        uuid.UUID(agent_id),
+    )
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    cat_rows = await pool.fetch(
+        """SELECT c.id, c.name FROM agent_categories ac
+           JOIN categories c ON c.id = ac.category_id
+           WHERE ac.agent_id = $1::uuid ORDER BY c.name""",
+        uuid.UUID(agent_id),
+    )
+    return {**dict(row), "categories": [dict(r) for r in cat_rows]}
+
+
+def _agent_out(data: dict) -> AgentOut:
+    aid = str(data["id"])
+    return AgentOut(
+        id=aid,
+        name=data["name"],
+        description=data["description"],
+        system_prompt=data["system_prompt"],
+        model=data["model"],
+        is_active=data["is_active"],
+        categories=[AgentCategoryOut(id=str(c["id"]), name=c["name"]) for c in data["categories"]],
+        endpoint=f"/api/agents/{aid}/chat",
+    )
+
+
+@app.get("/api/agents", response_model=list[AgentOut])
+async def api_list_agents():
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, name, description, system_prompt, model, is_active FROM agents ORDER BY created_at DESC"
+    )
+    agents = []
+    for r in rows:
+        cat_rows = await pool.fetch(
+            """SELECT c.id, c.name FROM agent_categories ac
+               JOIN categories c ON c.id = ac.category_id
+               WHERE ac.agent_id = $1 ORDER BY c.name""",
+            r["id"],
+        )
+        agents.append(_agent_out({**dict(r), "categories": [dict(cr) for cr in cat_rows]}))
+    return agents
+
+
+@app.post("/api/agents", response_model=AgentOut, status_code=201)
+async def api_create_agent(body: AgentCreate):
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """INSERT INTO agents (name, description, system_prompt)
+           VALUES ($1, $2, $3)
+           RETURNING id, name, description, system_prompt, model, is_active""",
+        body.name, body.description, body.system_prompt,
+    )
+    for cid in body.category_ids:
+        await pool.execute(
+            "INSERT INTO agent_categories (agent_id, category_id) VALUES ($1, $2::uuid)",
+            row["id"], uuid.UUID(cid),
+        )
+    data = await _load_agent(pool, str(row["id"]))
+    return _agent_out(data)
+
+
+@app.get("/api/agents/{agent_id}", response_model=AgentOut)
+async def api_get_agent(agent_id: str):
+    pool = await get_pool()
+    data = await _load_agent(pool, agent_id)
+    return _agent_out(data)
+
+
+@app.patch("/api/agents/{agent_id}", response_model=AgentOut)
+async def api_update_agent(agent_id: str, body: AgentUpdate):
+    pool = await get_pool()
+    aid = uuid.UUID(agent_id)
+    existing = await pool.fetchrow("SELECT id FROM agents WHERE id = $1", aid)
+    if not existing:
+        raise HTTPException(404, "Agent not found")
+
+    updates = []
+    params = []
+    for field in ("name", "description", "system_prompt", "is_active"):
+        val = getattr(body, field)
+        if val is not None:
+            updates.append(f"{field} = ${len(params) + 2}")
+            params.append(val)
+    if updates:
+        sql = f"UPDATE agents SET {', '.join(updates)} WHERE id = $1"
+        await pool.execute(sql, aid, *params)
+
+    if body.category_ids is not None:
+        await pool.execute("DELETE FROM agent_categories WHERE agent_id = $1", aid)
+        for cid in body.category_ids:
+            await pool.execute(
+                "INSERT INTO agent_categories (agent_id, category_id) VALUES ($1, $2::uuid)",
+                aid, uuid.UUID(cid),
+            )
+
+    data = await _load_agent(pool, agent_id)
+    return _agent_out(data)
+
+
+@app.delete("/api/agents/{agent_id}", status_code=204)
+async def api_delete_agent(agent_id: str):
+    pool = await get_pool()
+    result = await pool.execute("DELETE FROM agents WHERE id = $1::uuid", uuid.UUID(agent_id))
+    if result == "DELETE 0":
+        raise HTTPException(404, "Agent not found")
+    return Response(status_code=204)
+
+
+@app.post("/api/agents/{agent_id}/chat", response_model=QueryResponse)
+async def api_agent_chat(agent_id: str, body: AgentChatRequest):
+    from app.retrieval import query as retrieval_query
+
+    pool = await get_pool()
+    data = await _load_agent(pool, agent_id)
+    if not data["is_active"]:
+        raise HTTPException(400, "Agent is inactive")
+
+    category_ids = [str(c["id"]) for c in data["categories"]]
+
+    conversation_history: list[dict] | None = None
+    if body.conversation_id:
+        cid = uuid.UUID(body.conversation_id)
+        await pool.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES ($1, 'user', $2)",
+            cid, body.query,
+        )
+        rows = await pool.fetch(
+            "SELECT role, content FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
+            cid,
+        )
+        if len(rows) > 1:
+            conversation_history = [{"role": r["role"], "content": r["content"]} for r in rows[:-1]]
+
+    result = await retrieval_query(
+        body.query,
+        conversation_history=conversation_history,
+        category_ids=category_ids or None,
+        system_prompt=data["system_prompt"] or None,
+    )
+
+    if body.conversation_id:
+        cid = uuid.UUID(body.conversation_id)
+        meta = json.dumps({
+            "query_type": result.query_type.value,
+            "cached": result.cached,
+            "chunk_count": len(result.chunks_used),
+            "total_time": result.step_timings.get("total"),
+        })
+        await pool.execute(
+            "INSERT INTO messages (conversation_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3::jsonb)",
+            cid, result.answer, meta,
+        )
+        await pool.execute("UPDATE conversations SET updated_at = now() WHERE id = $1", cid)
+
+    chunks = [
+        ChunkOut(
+            chunk_id=c.chunk_id, content=c.content, score=round(c.score, 4),
+            section_path=c.section_path, filename=c.filename, source=c.source,
+        )
+        for c in result.chunks_used
+    ]
+    return QueryResponse(
+        answer=result.answer, chunks_used=chunks, query_type=result.query_type.value,
+        cached=result.cached, step_timings=result.step_timings, error=result.error,
+    )
+
+
+class DocumentUpdate(BaseModel):
+    category_id: str | None = None
+
+
+@app.patch("/api/documents/{doc_id}")
+async def api_update_document(doc_id: str, body: DocumentUpdate):
+    pool = await get_pool()
+    did = uuid.UUID(doc_id)
+    if body.category_id is not None:
+        cat = await pool.fetchrow(
+            "SELECT id FROM categories WHERE id = $1::uuid", uuid.UUID(body.category_id),
+        )
+        if not cat:
+            raise HTTPException(400, "Category not found")
+        result = await pool.execute(
+            "UPDATE documents SET category_id = $1::uuid WHERE id = $2 AND status = 'active'",
+            uuid.UUID(body.category_id), did,
+        )
+        if result == "UPDATE 0":
+            raise HTTPException(404, "Document not found")
+    return {"ok": True}
 
 
 @app.delete("/api/documents/{doc_id}", status_code=204)

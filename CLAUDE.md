@@ -28,7 +28,7 @@ Production-grade Agentic + Graph RAG system with 8 architectural layers. Accurac
 - **Neon project**: RAG_CHAT (`icy-fire-24933610`)
 - **Connection**: stored in `.env` as `DATABASE_URL`
 - **Extensions**: `vector` (pgvector), `pg_trgm`
-- **Neon Tables**: documents, chunks (+ search_tsvector), chunk_embeddings, entity_embeddings, relation_embeddings, community_summary_embeddings, ingestion_logs, semantic_cache, query_logs
+- **Neon Tables**: documents, chunks (+ search_tsvector), chunk_embeddings, entity_embeddings, relation_embeddings, community_summary_embeddings, ingestion_logs, semantic_cache, query_logs, agents, agent_categories
 - **Neo4j Nodes**: Entity (name, type, status, community_id), Community (summary)
 
 ## Implementation Phases

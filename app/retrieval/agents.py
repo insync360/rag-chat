@@ -100,16 +100,18 @@ async def vector_agent(state: dict) -> dict:
 
         small_emb = await _retry(embed_query_small, client, query)
 
+        category_ids = state.get("category_ids")
+
         # Search with all queries, merge
         all_chunks: list[RetrievedChunk] = []
         for q in queries:
             if q == query:
                 # Primary query: HyDE embedding for vector, raw text for BM25
-                chunks = await _retry(hybrid_search, q, hyde_hybrid_emb, None, filters)
+                chunks = await _retry(hybrid_search, q, hyde_hybrid_emb, None, filters, category_ids)
             else:
                 # Expanded queries: embed individually (no HyDE)
                 _, q_hybrid = await _retry(embed_query, client, q)
-                chunks = await _retry(hybrid_search, q, q_hybrid, None, filters)
+                chunks = await _retry(hybrid_search, q, q_hybrid, None, filters, category_ids)
             all_chunks.extend(chunks)
 
         # Deduplicate by chunk_id (keep highest score)
@@ -160,7 +162,8 @@ async def graph_agent(state: dict) -> dict:
             client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
             emb_256 = await embed_query_small(client, query)
 
-        chunks, paths = await _retry(graph_search, query, emb_256)
+        category_ids = state.get("category_ids")
+        chunks, paths = await _retry(graph_search, query, emb_256, None, None, category_ids)
 
         # Rerank graph chunks through Cohere so scores are comparable with vector chunks
         if chunks:
@@ -287,9 +290,11 @@ async def summariser_agent(state: dict) -> dict:
 
         calc_result = state.get("calculation_result")
         conversation_history = state.get("conversation_history", [])
+        agent_system_prompt = state.get("agent_system_prompt")
 
         answer = await _retry(summarise_chunks, query, chunks, graph_paths, calc_result,
-                              conversation_history=conversation_history)
+                              conversation_history=conversation_history,
+                              agent_system_prompt=agent_system_prompt)
 
         elapsed = time.monotonic() - t0
         return {

@@ -100,6 +100,7 @@ async def _vector_search(
     query_embedding_768: list[float],
     top_k: int,
     metadata_filters: dict | None = None,
+    category_ids: list[str] | None = None,
 ) -> list[RetrievedChunk]:
     pool = await get_pool()
     emb_str = str(query_embedding_768)
@@ -118,6 +119,10 @@ async def _vector_search(
         if "section_path" in filters:
             filter_clause += f" AND c.section_path ILIKE ${len(params) + 1}"
             params.append(f"%{filters['section_path']}%")
+
+    if category_ids:
+        filter_clause += f" AND d.category_id = ANY(${len(params) + 1}::uuid[])"
+        params.append(category_ids)
 
     # Exclude structural chunk types (HEADING, INDEX)
     exclude_types = settings.RETRIEVAL_EXCLUDE_CHUNK_TYPES
@@ -166,6 +171,7 @@ async def _bm25_search(
     query_text: str,
     top_k: int,
     metadata_filters: dict | None = None,
+    category_ids: list[str] | None = None,
 ) -> list[RetrievedChunk]:
     pool = await get_pool()
 
@@ -183,6 +189,10 @@ async def _bm25_search(
         if "section_path" in filters:
             filter_clause += f" AND c.section_path ILIKE ${len(params) + 1}"
             params.append(f"%{filters['section_path']}%")
+
+    if category_ids:
+        filter_clause += f" AND d.category_id = ANY(${len(params) + 1}::uuid[])"
+        params.append(category_ids)
 
     # Exclude structural chunk types (HEADING, INDEX)
     exclude_types = settings.RETRIEVAL_EXCLUDE_CHUNK_TYPES
@@ -249,6 +259,7 @@ async def hybrid_search(
     query_embedding_768: list[float],
     top_k: int | None = None,
     metadata_filters: dict | None = None,
+    category_ids: list[str] | None = None,
 ) -> list[RetrievedChunk]:
     """Run vector + BM25 search, fuse with RRF, return top_k chunks."""
     top_k = top_k or settings.RETRIEVAL_TOP_K_FINAL
@@ -258,8 +269,8 @@ async def hybrid_search(
     # Run vector and BM25 in parallel
     import asyncio
     vec_chunks, bm25_chunks = await asyncio.gather(
-        _vector_search(query_embedding_768, k_vec, metadata_filters),
-        _bm25_search(query, k_bm25, metadata_filters),
+        _vector_search(query_embedding_768, k_vec, metadata_filters, category_ids),
+        _bm25_search(query, k_bm25, metadata_filters, category_ids),
     )
 
     # Build ranked lists for RRF

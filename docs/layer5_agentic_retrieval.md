@@ -831,3 +831,57 @@ Entity stored with source_chunk_index = TOC/heading chunk
 | Setting | Value | Purpose |
 |---------|-------|---------|
 | `GRAPH_SEARCH_MAX_SEED_DEGREE` | `15` | Max Neo4j connections before a seed entity is filtered as a hub |
+
+---
+
+## 18. Category-Scoped Agents
+
+Agents are named retrieval endpoints scoped to specific document categories. Each agent has a name, description, system prompt, and a set of assigned categories. When a query is routed through an agent, the retrieval pipeline filters all searches (vector, BM25, graph) to only return chunks from documents in the agent's categories.
+
+### Database Schema (migration 016)
+
+| Table | Columns | Purpose |
+|-------|---------|---------|
+| `agents` | id, name, description, system_prompt, model, is_active, created_at | Agent definitions |
+| `agent_categories` | agent_id, category_id (composite PK) | Junction table linking agents to categories |
+
+### API Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/agents` | GET | List all agents with their categories |
+| `/api/agents` | POST | Create agent with name, description, system_prompt, category_ids |
+| `/api/agents/{id}` | GET | Get single agent |
+| `/api/agents/{id}` | PATCH | Update agent fields + categories |
+| `/api/agents/{id}` | DELETE | Delete agent |
+| `/api/agents/{id}/chat` | POST | External chat endpoint — `{ query, conversation_id? }` |
+
+### Category Filtering Flow
+
+```
+POST /api/agents/{id}/chat
+  → load agent → get category_ids from agent_categories
+  → query(user_query, category_ids=[...], system_prompt="...")
+    → vector_search: WHERE d.category_id = ANY($N::uuid[])
+    → bm25_search:   WHERE d.category_id = ANY($N::uuid[])
+    → graph_search._resolve_to_chunks: WHERE d.category_id = ANY($N::uuid[])
+    → summariser: agent system_prompt prepended to default system prompt
+```
+
+### State Extensions
+
+Two new fields in `GraphState` (graph_builder.py):
+- `category_ids: list[str] | None` — passed through to vector_agent and graph_agent
+- `agent_system_prompt: str | None` — passed through to summariser_agent
+
+### System Prompt Composition
+
+When an agent has a `system_prompt`, it is prepended to the default summariser system prompt:
+
+```
+{agent.system_prompt}
+
+{default _SYSTEM_PROMPT (citation rules, chunk-only constraint, etc.)}
+```
+
+This allows the agent prompt to set domain-specific behavior while preserving the core RAG constraints.

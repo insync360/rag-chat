@@ -91,6 +91,7 @@ async def summarise_chunks(
     calculation_result: str | None = None,
     max_tokens: int | None = None,
     conversation_history: list[dict] | None = None,
+    agent_system_prompt: str | None = None,
 ) -> str:
     """Compress chunks into final answer. Never raises — returns error message on failure."""
     max_tokens = max_tokens or settings.SUMMARISER_MAX_TOKENS
@@ -107,7 +108,8 @@ async def summarise_chunks(
             user_msg += f"\n\nCalculation result: {calculation_result}"
 
         # Build messages: system → optional history → current user message
-        messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        system_content = f"{agent_system_prompt}\n\n{_SYSTEM_PROMPT}" if agent_system_prompt else _SYSTEM_PROMPT
+        messages: list[dict] = [{"role": "system", "content": system_content}]
 
         if conversation_history:
             trimmed = _trim_history(
