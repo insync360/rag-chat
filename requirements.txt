@@ -14,3 +14,6 @@ langgraph>=0.2
 cohere>=5.0
 langchain-core>=0.3
 streamlit
+fastapi>=0.115
+uvicorn[standard]>=0.32
+python-multipart
