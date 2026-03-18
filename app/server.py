@@ -431,6 +431,20 @@ async def api_delete_category(cat_id: str):
     return Response(status_code=204)
 
 
+@app.post("/api/transcribe")
+async def api_transcribe(audio: UploadFile):
+    from openai import AsyncOpenAI
+    from app.config import settings
+
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    audio_bytes = await audio.read()
+    result = await client.audio.transcriptions.create(
+        model="whisper-1",
+        file=("audio.webm", audio_bytes, audio.content_type or "audio/webm"),
+    )
+    return {"text": result.text}
+
+
 @app.delete("/api/documents/{doc_id}", status_code=204)
 async def api_delete_document(doc_id: str):
     pool = await get_pool()
