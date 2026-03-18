@@ -106,6 +106,7 @@ class Settings:
     GRAPH_SEARCH_TOP_K: int = 10
     GRAPH_SEARCH_ENTITY_TOP_K: int = 5
     GRAPH_SEARCH_MAX_PATHS: int = 30
+    GRAPH_SEARCH_MAX_SEED_DEGREE: int = 15
 
     # Reranker (Cohere)
     COHERE_API_KEY: str = os.environ.get("COHERE_API_KEY", "")

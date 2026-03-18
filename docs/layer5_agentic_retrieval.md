@@ -106,7 +106,7 @@ Query → [Embed 256-dim] → [Cache Check] → [LangGraph] → [Cache Store] �
 |------|-------|---------|
 | `app/retrieval/__init__.py` | 125 | `query()` entry point — cache check, LangGraph invoke, cache store, query logging |
 | `app/retrieval/models.py` | 68 | Dataclasses: QueryType, RetrievedChunk, GraphPath, ConflictResolution, ExecutionPlan, QueryResult |
-| `app/retrieval/classifier.py` | 165 | Query classification — heuristic regex + GPT-5.4 LLM fallback |
+| `app/retrieval/classifier.py` | 174 | Query classification — heuristic regex + GPT-5.4 LLM (always called for expanded queries) |
 | `app/retrieval/cache.py` | 108 | Semantic cache — check + store via 256-dim cosine similarity |
 | `app/retrieval/vector_search.py` | 242 | Query embedding, HNSW vector search, BM25 tsvector search, RRF fusion |
 | `app/retrieval/graph_search.py` | 320 | Entity embedding match, Neo4j 2-hop traversal, path cap, chunk resolution |
@@ -118,6 +118,7 @@ Query → [Embed 256-dim] → [Cache Check] → [LangGraph] → [Cache Store] �
 | `app/retrieval/graph_builder.py` | 139 | LangGraph StateGraph wiring — conditional routing + parallel fan-out |
 | `migrations/011_semantic_cache.sql` | 17 | `semantic_cache` table + HNSW + expiry index |
 | `migrations/012_query_logs.sql` | 18 | `query_logs` table + indexes |
+| `migrations/013_enriched_search_tsvector.sql` | 36 | Enriched `search_tsvector` column + GIN index + trigger |
 
 ---
 
@@ -175,13 +176,16 @@ Two parallel search paths fused via Reciprocal Rank Fusion (RRF):
 - **Filters**: Active documents only (`d.status = 'active'`), optional `document_id` or `filename ILIKE` filter
 - **Top-K**: `RETRIEVAL_TOP_K_VECTOR` (20)
 
-### BM25 Search (tsvector)
+### BM25 Search (enriched tsvector)
 
-- **Index**: `idx_chunks_content_tsvector` — GIN on `to_tsvector('english', content)`
+- **Column**: `chunks.search_tsvector` — pre-computed tsvector combining `content` + `metadata.summary` + `metadata.hypothetical_questions` + `metadata.keywords`
+- **Index**: `idx_chunks_search_tsvector` — GIN on `search_tsvector`
+- **Trigger**: `trg_chunks_search_tsvector` auto-updates `search_tsvector` on INSERT/UPDATE
 - **Ranking**: `ts_rank_cd` with normalization flag 32 (divides by document length)
 - **Query**: `plainto_tsquery('english', $1)` — automatic stemming and stop-word removal
 - **Filters**: Same active document + metadata filters as vector search
 - **Top-K**: `RETRIEVAL_TOP_K_BM25` (20)
+- **Why enriched**: Raw content often uses different vocabulary than queries (e.g., Section 12 uses "promoter/advertisement/prospectus" while Q8 asks about "buyer/remedies/advance"). LLM-enriched metadata bridges the lexical gap — hypothetical_questions contain query-like phrasing, keywords contain synonyms
 
 ### RRF Fusion
 
@@ -555,7 +559,7 @@ Every agent function returns a partial state dict on failure — the pipeline al
 |----------|----------|
 | `query()` top-level exception | Returns `QueryResult(skipped=True, error=...)`, never raises |
 | Planner classification fails | Defaults to `ExecutionPlan(query_type=SIMPLE)`, logs error |
-| Heuristic regex matches | Bypasses LLM classification entirely, no API cost |
+| Heuristic regex matches | Heuristic overrides query_type, but LLM still called for expanded queries |
 | Vector search fails | Returns empty `retrieved_chunks`, error appended to state |
 | BM25 query has no matches | Returns empty list, RRF fusion uses vector results only |
 | Graph search fails | Returns empty chunks + paths, error appended to state |
@@ -743,3 +747,87 @@ Post-remediation fixes addressing 6 failure modes found in Q8/Q9/Q10 re-testing.
 ### Ingestion Gap Diagnosis (Fix 6)
 - Sections 11, 12, 16 confirmed present in corpus (3 chunks, all with hybrid embeddings)
 - No re-ingestion needed — retrieval-only fixes sufficient
+
+---
+
+## Evaluation Fixes (v2 — Round 3)
+
+Post-remediation fixes addressing Section 12 retrieval gap (Q8 scored 2.5/5 across 4 runs).
+
+### Enriched BM25 Search (migration 013)
+- New `search_tsvector` column on `chunks` — pre-computed tsvector combining `content` + `metadata.summary` + `metadata.hypothetical_questions` + `metadata.keywords`
+- GIN index `idx_chunks_search_tsvector` for fast full-text search
+- Auto-update trigger `trg_chunks_search_tsvector` for future inserts/updates
+- Section 12's hypothetical_questions contain "compensation for losses", "rights of person who wants to withdraw", "misleading advertisements" — terms that bridge the lexical gap with Q8's "buyer/remedies/advance" vocabulary
+- BM25 now uses `c.search_tsvector` instead of on-the-fly `to_tsvector('english', c.content)` — faster (pre-computed) and broader (enriched metadata)
+
+### Expanded Queries on Heuristic Match
+- Classifier always calls LLM even when heuristic regex matches — heuristic overrides `query_type` but LLM generates `expanded_queries`
+- Previously: heuristic match → `expanded_queries = [original_query]` → no reformulations → no counter-party perspective
+- Now: heuristic match → LLM generates 1-3 reformulations (e.g., "promoter obligations regarding advertisements") → BM25 + vector search both benefit
+- System prompt enhanced with expanded query rules: counter-party obligation expansion, penalty/violation pairing, legal synonym expansion
+
+### Root Cause
+Two compounding failures: (1) BM25 searched only raw `content` — zero keyword overlap between Section 12's "promoter/advertisement/prospectus" and Q8's "buyer/remedies/advance"; (2) heuristic bypass killed expanded queries — no LLM-generated reformulations to bridge the gap
+
+---
+
+## Evaluation Fixes (v2 — Round 4)
+
+Root cause fixes for a cascading failure across graph retrieval, conflict detection, and summariser. Graph chunks (HEADING/INDEX entries) crowded out real statutory content, producing "specific details not provided" answers.
+
+### Cascade Root Cause
+
+```
+Entity stored with source_chunk_index = TOC/heading chunk
+  → graph_search._resolve_to_chunks() had NO chunk type filter
+  → Graph agent returned HEADING chunks at hop_weight scores (0.25–1.0)
+  → Graph agent did NOT call Cohere rerank (unlike vector agent)
+  → summariser._build_context() put graph chunks FIRST
+  → HEADING chunks filled SUMMARISER_MAX_CHUNKS budget
+  → Vector chunks with actual statutory text dropped
+  → LLM: "specific details not provided"
+```
+
+### Fix 1 — Filter HEADING/INDEX in Graph Search (`graph_search.py`)
+
+- Added `AND COALESCE(c.metadata->>'chunk_type', 'PARAGRAPH') != ALL($4::text[])` to `_resolve_to_chunks()` SQL
+- Uses `settings.RETRIEVAL_EXCLUDE_CHUNK_TYPES` (same list as vector/BM25 search)
+- Graph search now applies the same chunk type exclusion as vector search
+
+### Fix 2 — Rerank Graph Chunks Through Cohere (`agents.py`)
+
+- Graph agent now calls `rerank(query, chunks)` after `graph_search()` returns
+- Graph chunk scores become Cohere relevance scores (0.0–1.0), directly comparable with vector chunk scores
+- Previously: graph chunks had hop_weight scores (0.25–1.0) that weren't comparable — 2-hop HEADING chunk at 0.50 could outrank a highly relevant vector chunk at 0.45
+
+### Fix 3 — Remove Graph-First Priority in Summariser (`summariser.py`)
+
+- `_build_context()` changed from 3-tier (graph → DEFINITION → other) to 2-tier (DEFINITION → other by score)
+- With Fix 2 making graph and vector scores comparable, graph-first priority is no longer needed
+- Chunks now compete purely on Cohere relevance score (within tier)
+
+### Fix 4 — Filter Hub Entities from Graph Seeds (`graph_search.py`)
+
+**(a) Case-insensitive seed deduplication:**
+- "promoter" and "The promoter" collapsed to single seed
+- Prevents duplicate traversals doubling noise
+
+**(b) Degree-based hub filtering:**
+- New config: `GRAPH_SEARCH_MAX_SEED_DEGREE` (default 15)
+- After finding seeds, queries each seed's Neo4j degree (connection count)
+- Seeds with degree > 15 filtered out (hub entities like "promoter" with 20+ connections)
+- Safety net: if ALL seeds are hubs, keeps the lowest-degree one
+
+### Fix 5 — Entity-Scoped Conflict Detection (`conflict.py`)
+
+- Rewritten `_SYSTEM_PROMPT` with explicit NOT-contradiction rules
+- Different entities with different penalties/obligations no longer flagged (e.g., promoter penalty ≠ agent penalty)
+- General rule vs. specific exception recognized as complementary, not contradictory
+- Expected: false positive conflicts drop to ~0, saving ~7s of wasted resolution time
+
+### Configuration Change
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `GRAPH_SEARCH_MAX_SEED_DEGREE` | `15` | Max Neo4j connections before a seed entity is filtered as a hub |

@@ -195,12 +195,12 @@ async def _bm25_search(
         SELECT c.id::text AS chunk_id, c.document_id::text, c.content,
                c.section_path, c.metadata,
                d.filename, d.version, d.ingested_at,
-               ts_rank_cd(to_tsvector('english', c.content),
+               ts_rank_cd(c.search_tsvector,
                           plainto_tsquery('english', $1), 32) AS bm25_score
         FROM chunks c
         JOIN documents d ON d.id = c.document_id
         WHERE d.status = 'active'
-          AND to_tsvector('english', c.content) @@ plainto_tsquery('english', $1)
+          AND c.search_tsvector @@ plainto_tsquery('english', $1)
         {filter_clause}
         ORDER BY bm25_score DESC
         LIMIT $2

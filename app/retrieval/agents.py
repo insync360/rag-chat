@@ -146,10 +146,11 @@ async def vector_agent(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def graph_agent(state: dict) -> dict:
-    """Entity match → Neo4j traverse → chunk retrieval."""
+    """Entity match → Neo4j traverse → chunk retrieval → Cohere rerank."""
     t0 = time.monotonic()
     try:
         from app.retrieval.graph_search import graph_search
+        from app.retrieval.reranker import rerank
 
         query = state["original_query"]
         emb_256 = state.get("query_embedding_256")
@@ -160,6 +161,10 @@ async def graph_agent(state: dict) -> dict:
             emb_256 = await embed_query_small(client, query)
 
         chunks, paths = await _retry(graph_search, query, emb_256)
+
+        # Rerank graph chunks through Cohere so scores are comparable with vector chunks
+        if chunks:
+            chunks = await _retry(rerank, query, chunks)
 
         elapsed = time.monotonic() - t0
         return {

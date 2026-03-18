@@ -12,7 +12,15 @@ from app.retrieval.models import ConflictResolution, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """Analyze the provided text chunks for contradictions. Two claims contradict if they assert incompatible facts about the same subject.
+_SYSTEM_PROMPT = """Analyze the provided text chunks for contradictions.
+
+Two claims contradict ONLY if they assert incompatible facts about the SAME entity performing the SAME action or having the SAME attribute.
+
+NOT contradictions (do NOT flag these):
+- Different entities having different penalties, obligations, or rights (e.g., promoter penalty ≠ agent penalty)
+- Different sections describing different requirements
+- General rule vs. specific exception (these complement each other)
+- Different time periods or conditions with different outcomes
 
 Return JSON with exactly this key:
 - "conflicts": array of objects, each with:

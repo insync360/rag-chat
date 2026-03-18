@@ -31,28 +31,20 @@ def _build_context(
     graph_paths: list[GraphPath],
     max_tokens: int,
 ) -> str:
-    """Build context string with 3-tier priority: graph → definitions → other."""
-    # Partition: graph-sourced first, then DEFINITION, then rest by score
-    graph_chunk_ids = set()
-    for path in graph_paths:
-        graph_chunk_ids.update(path.source_chunks)
-
-    graph_chunks = [c for c in chunks if c.chunk_id in graph_chunk_ids]
-    non_graph = [c for c in chunks if c.chunk_id not in graph_chunk_ids]
-
+    """Build context string with 2-tier priority: definitions → other by score."""
     definition_chunks = [
-        c for c in non_graph
+        c for c in chunks
         if c.metadata.get("chunk_type") in _PRIORITY_CHUNK_TYPES
     ]
     other_chunks = [
-        c for c in non_graph
+        c for c in chunks
         if c.metadata.get("chunk_type") not in _PRIORITY_CHUNK_TYPES
     ]
 
     definition_chunks.sort(key=lambda c: c.score, reverse=True)
     other_chunks.sort(key=lambda c: c.score, reverse=True)
 
-    ordered = graph_chunks + definition_chunks + other_chunks
+    ordered = definition_chunks + other_chunks
     parts: list[str] = []
     budget = max_tokens * 4  # rough char estimate
 

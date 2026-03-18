@@ -48,6 +48,12 @@ Common mistakes to AVOID:
 - "Section X says... but the proviso says..." is NOT FILTERED — it requires contradiction analysis → ANALYTICAL
 - "What happens if the buyer suffers financial loss?" is NOT FILTERED — it requires multi-hop reasoning → GRAPH or ANALYTICAL
 
+Expanded query generation rules:
+- Always include the original query as-is
+- For queries about rights/remedies of one party, add a query about the OBLIGATIONS of the counter-party
+- For queries about penalties, add a query about the VIOLATIONS that trigger them
+- Use legal synonym expansion: "buyer" → "allottee/purchaser", "advance" → "deposit/amount paid"
+
 Return ONLY valid JSON, no markdown fences."""
 
 
@@ -117,32 +123,35 @@ async def classify_query(query: str) -> ExecutionPlan:
     expanded: list[str] = [query]
     filters: dict = {}
 
-    if heuristic:
-        query_type = heuristic
-    else:
-        try:
-            client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-            resp = await client.chat.completions.create(
-                model=settings.QUERY_CLASSIFIER_MODEL,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": query},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0,
-                max_completion_tokens=512,
-            )
-            data = json.loads(resp.choices[0].message.content)
+    # Always call LLM for expanded queries; heuristic overrides query_type only
+    try:
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        resp = await client.chat.completions.create(
+            model=settings.QUERY_CLASSIFIER_MODEL,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": query},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0,
+            max_completion_tokens=512,
+        )
+        data = json.loads(resp.choices[0].message.content)
 
+        expanded = data.get("expanded_queries", [query]) or [query]
+        filters = data.get("metadata_filters", {}) or {}
+
+        if heuristic:
+            query_type = heuristic
+        else:
             qt = data.get("query_type", "SIMPLE").upper()
             if qt in QueryType.__members__:
                 query_type = QueryType(qt)
 
-            expanded = data.get("expanded_queries", [query]) or [query]
-            filters = data.get("metadata_filters", {}) or {}
-
-        except Exception as exc:
-            logger.warning("Query classification failed, defaulting to SIMPLE: %s", exc)
+    except Exception as exc:
+        logger.warning("Query classification failed, defaulting: %s", exc)
+        if heuristic:
+            query_type = heuristic
 
     # Build plan
     plan = ExecutionPlan(

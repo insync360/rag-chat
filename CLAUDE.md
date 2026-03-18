@@ -28,7 +28,7 @@ Production-grade Agentic + Graph RAG system with 8 architectural layers. Accurac
 - **Neon project**: RAG_CHAT (`icy-fire-24933610`)
 - **Connection**: stored in `.env` as `DATABASE_URL`
 - **Extensions**: `vector` (pgvector), `pg_trgm`
-- **Neon Tables**: documents, chunks, chunk_embeddings, entity_embeddings, relation_embeddings, community_summary_embeddings, ingestion_logs, semantic_cache, query_logs
+- **Neon Tables**: documents, chunks (+ search_tsvector), chunk_embeddings, entity_embeddings, relation_embeddings, community_summary_embeddings, ingestion_logs, semantic_cache, query_logs
 - **Neo4j Nodes**: Entity (name, type, status, community_id), Community (summary)
 
 ## Implementation Phases
@@ -82,7 +82,7 @@ rag_chat/
 │       └── graph_builder.py   # 139 lines — LangGraph StateGraph wiring + conditional routing
 ├── scripts/                   # Utility scripts
 │   └── reset_and_ingest.py    # Clear all data + full end-to-end ingestion
-├── migrations/                # 12 SQL migrations (001–012)
+├── migrations/                # 13 SQL migrations (001–013)
 ├── models/                    # Saved PyTorch weights (GraphSAGE + TransE)
 ├── docs/                      # Technical documentation (Layer 1 + Layer 2)
 ├── Test Cases/                # 19 test files (~3,850 lines)

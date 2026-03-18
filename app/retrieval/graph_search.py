@@ -220,6 +220,7 @@ async def _resolve_to_chunks(
     doc_ids = [p[0] for p in pairs]
     chunk_indices = [p[1] for p in pairs]
 
+    exclude_types = settings.RETRIEVAL_EXCLUDE_CHUNK_TYPES  # ["HEADING", "INDEX"]
     rows = await pool.fetch(
         """
         SELECT c.id::text AS chunk_id, c.document_id::text, c.content,
@@ -231,9 +232,10 @@ async def _resolve_to_chunks(
           AND (c.document_id::text, c.chunk_index) IN (
               SELECT unnest($1::text[]), unnest($2::int[])
           )
+          AND COALESCE(c.metadata->>'chunk_type', 'PARAGRAPH') != ALL($4::text[])
         LIMIT $3
         """,
-        doc_ids, chunk_indices, top_k,
+        doc_ids, chunk_indices, top_k, exclude_types,
     )
 
     # Weight by hop distance
@@ -294,6 +296,41 @@ async def graph_search(
         if not seed_names:
             logger.info("Graph search: no seed entities found")
             return [], []
+
+        # Deduplicate seeds case-insensitively (e.g., "promoter" and "The promoter")
+        seen_lower: set[str] = set()
+        deduped: list[str] = []
+        for name in seed_names:
+            if name.lower() not in seen_lower:
+                seen_lower.add(name.lower())
+                deduped.append(name)
+        seed_names = deduped
+
+        # Filter hub entities with too many connections (breadth-first noise)
+        max_degree = settings.GRAPH_SEARCH_MAX_SEED_DEGREE
+        driver = await get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                UNWIND $names AS name
+                MATCH (e:Entity {status: 'active'})
+                WHERE toLower(e.name) = toLower(name)
+                OPTIONAL MATCH (e)-[r]-()
+                RETURN e.name AS name, count(r) AS degree
+                """,
+                names=seed_names,
+            )
+            degrees: dict[str, int] = {}
+            async for r in result:
+                degrees[r["name"]] = r["degree"]
+
+        filtered = [n for n in seed_names if degrees.get(n, 0) <= max_degree]
+        if filtered:
+            seed_names = filtered
+        else:
+            # Keep at least the lowest-degree seed if all are hubs
+            seed_names = sorted(seed_names, key=lambda n: degrees.get(n, 0))[:1]
+            logger.info("Graph search: all seeds exceed degree %d, kept lowest: %s", max_degree, seed_names)
 
         logger.info("Graph search: %d seed entities: %s", len(seed_names), seed_names[:5])
 
