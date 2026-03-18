@@ -50,6 +50,8 @@ class GraphState(TypedDict):
     # Embeddings carried through state for downstream agents
     query_embedding_256: list[float] | None
     query_embedding_768: list[float] | None
+    # Conversation history — passthrough, only read by summariser
+    conversation_history: list[dict]
 
 
 # ---------------------------------------------------------------------------

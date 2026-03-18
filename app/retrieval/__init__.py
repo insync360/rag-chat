@@ -16,7 +16,7 @@ from app.retrieval.models import QueryResult, QueryType
 logger = logging.getLogger(__name__)
 
 
-async def query(user_query: str) -> QueryResult:
+async def query(user_query: str, conversation_history: list[dict] | None = None) -> QueryResult:
     """Main entry point. Checks cache → runs LangGraph → caches result. Never raises."""
     try:
         from openai import AsyncOpenAI
@@ -55,6 +55,7 @@ async def query(user_query: str) -> QueryResult:
             "pass_count": 0,
             "query_embedding_256": query_emb_256,
             "query_embedding_768": None,
+            "conversation_history": conversation_history or [],
         }
 
         final_state = await graph.ainvoke(initial_state)

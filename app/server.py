@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.database import close_pool, get_pool
@@ -46,6 +47,7 @@ app.add_middleware(
 
 class QueryRequest(BaseModel):
     query: str
+    conversation_id: str | None = None
 
 
 class ChunkOut(BaseModel):
@@ -90,13 +92,76 @@ class UploadResponse(BaseModel):
     files: list[FileResultOut]
 
 
+class ConversationOut(BaseModel):
+    id: str
+    title: str
+    last_message: str
+    message_count: int
+    updated_at: str
+
+
+class MessageOut(BaseModel):
+    id: str
+    role: str
+    content: str
+    metadata: dict | None
+    created_at: str
+
+
+class ConversationCreate(BaseModel):
+    title: str | None = None
+
+
+class ConversationUpdate(BaseModel):
+    title: str
+
+
 # ── Endpoints ────────────────────────────────────────────────────────
 
 @app.post("/api/query", response_model=QueryResponse)
 async def api_query(body: QueryRequest):
     from app.retrieval import query
 
-    result = await query(body.query)
+    pool = await get_pool()
+    conversation_history: list[dict] | None = None
+
+    # If conversation_id provided, persist user message and load history
+    if body.conversation_id:
+        cid = uuid.UUID(body.conversation_id)
+        # Insert user message
+        await pool.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES ($1, 'user', $2)",
+            cid, body.query,
+        )
+        # Load prior messages (excluding the just-inserted one)
+        rows = await pool.fetch(
+            """SELECT role, content FROM messages
+               WHERE conversation_id = $1
+               ORDER BY created_at ASC""",
+            cid,
+        )
+        # Exclude last row (the just-inserted user message)
+        if len(rows) > 1:
+            conversation_history = [{"role": r["role"], "content": r["content"]} for r in rows[:-1]]
+
+    result = await query(body.query, conversation_history=conversation_history)
+
+    # Persist assistant message if in a conversation
+    if body.conversation_id:
+        cid = uuid.UUID(body.conversation_id)
+        meta = json.dumps({
+            "query_type": result.query_type.value,
+            "cached": result.cached,
+            "chunk_count": len(result.chunks_used),
+            "total_time": result.step_timings.get("total"),
+        })
+        await pool.execute(
+            "INSERT INTO messages (conversation_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3::jsonb)",
+            cid, result.answer, meta,
+        )
+        await pool.execute(
+            "UPDATE conversations SET updated_at = now() WHERE id = $1", cid,
+        )
 
     chunks = [
         ChunkOut(
@@ -118,6 +183,97 @@ async def api_query(body: QueryRequest):
         step_timings=result.step_timings,
         error=result.error,
     )
+
+
+# ── Conversation endpoints ──────────────────────────────────────────
+
+@app.get("/api/conversations", response_model=list[ConversationOut])
+async def api_list_conversations():
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT c.id, c.title, c.updated_at,
+                  COUNT(m.id) AS message_count,
+                  COALESCE(
+                      (SELECT content FROM messages
+                       WHERE conversation_id = c.id ORDER BY created_at DESC LIMIT 1),
+                      ''
+                  ) AS last_message
+           FROM conversations c
+           LEFT JOIN messages m ON m.conversation_id = c.id
+           GROUP BY c.id
+           ORDER BY c.updated_at DESC"""
+    )
+    return [
+        ConversationOut(
+            id=str(r["id"]),
+            title=r["title"],
+            last_message=r["last_message"][:100],
+            message_count=r["message_count"],
+            updated_at=r["updated_at"].isoformat(),
+        )
+        for r in rows
+    ]
+
+
+@app.post("/api/conversations", response_model=ConversationOut)
+async def api_create_conversation(body: ConversationCreate | None = None):
+    pool = await get_pool()
+    title = (body.title if body and body.title else "New Conversation")
+    row = await pool.fetchrow(
+        "INSERT INTO conversations (title) VALUES ($1) RETURNING id, title, created_at, updated_at",
+        title,
+    )
+    return ConversationOut(
+        id=str(row["id"]),
+        title=row["title"],
+        last_message="",
+        message_count=0,
+        updated_at=row["updated_at"].isoformat(),
+    )
+
+
+@app.get("/api/conversations/{conv_id}/messages", response_model=list[MessageOut])
+async def api_get_messages(conv_id: str):
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT id, role, content, metadata, created_at
+           FROM messages WHERE conversation_id = $1::uuid
+           ORDER BY created_at ASC""",
+        uuid.UUID(conv_id),
+    )
+    return [
+        MessageOut(
+            id=str(r["id"]),
+            role=r["role"],
+            content=r["content"],
+            metadata=json.loads(r["metadata"]) if r["metadata"] else None,
+            created_at=r["created_at"].isoformat(),
+        )
+        for r in rows
+    ]
+
+
+@app.patch("/api/conversations/{conv_id}")
+async def api_update_conversation(conv_id: str, body: ConversationUpdate):
+    pool = await get_pool()
+    result = await pool.execute(
+        "UPDATE conversations SET title = $1, updated_at = now() WHERE id = $2::uuid",
+        body.title, uuid.UUID(conv_id),
+    )
+    if result == "UPDATE 0":
+        raise HTTPException(404, "Conversation not found")
+    return {"ok": True}
+
+
+@app.delete("/api/conversations/{conv_id}", status_code=204)
+async def api_delete_conversation(conv_id: str):
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM conversations WHERE id = $1::uuid", uuid.UUID(conv_id),
+    )
+    if result == "DELETE 0":
+        raise HTTPException(404, "Conversation not found")
+    return Response(status_code=204)
 
 
 @app.post("/api/upload", response_model=UploadResponse)

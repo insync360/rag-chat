@@ -123,6 +123,10 @@ class Settings:
     SUMMARISER_MODEL: str = "gpt-4o"
     SUMMARISER_MAX_TOKENS: int = 2048
 
+    # Conversation history (for summariser)
+    CONVERSATION_MAX_HISTORY_MESSAGES: int = 10
+    CONVERSATION_MAX_HISTORY_CHARS: int = 6000
+
     # Calculator
     CALCULATOR_MODEL: str = "gpt-4o-mini"
 

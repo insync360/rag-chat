@@ -20,7 +20,8 @@ Rules:
 - Be concise but thorough — include all relevant details from the context
 - If chunks contain conflicting information, note the conflict and which source you trust more
 - Structure your answer with clear paragraphs for complex responses
-- Pay special attention to Explanation clauses and Provisos — these define or qualify key terms and MUST be included in your answer when relevant"""
+- Pay special attention to Explanation clauses and Provisos — these define or qualify key terms and MUST be included in your answer when relevant
+- If prior conversation messages are present, use them to understand the user's intent and resolve pronouns/references, but STILL only use the provided context chunks for factual content"""
 
 
 _PRIORITY_CHUNK_TYPES = {"DEFINITION"}
@@ -61,12 +62,35 @@ def _build_context(
     return "\n\n".join(parts)
 
 
+def _trim_history(
+    history: list[dict],
+    max_messages: int,
+    max_chars: int,
+) -> list[dict]:
+    """Take last N messages, trim oldest if over char budget, ensure first msg is user."""
+    trimmed = history[-max_messages:]
+    # Ensure first message is role=user (for valid multi-turn)
+    while trimmed and trimmed[0].get("role") != "user":
+        trimmed = trimmed[1:]
+    # Trim oldest messages if over char budget
+    total = sum(len(m.get("content", "")) for m in trimmed)
+    while trimmed and total > max_chars:
+        total -= len(trimmed[0].get("content", ""))
+        trimmed = trimmed[1:]
+        # Re-ensure first message is user
+        while trimmed and trimmed[0].get("role") != "user":
+            total -= len(trimmed[0].get("content", ""))
+            trimmed = trimmed[1:]
+    return trimmed
+
+
 async def summarise_chunks(
     query: str,
     chunks: list[RetrievedChunk],
     graph_paths: list[GraphPath] | None = None,
     calculation_result: str | None = None,
     max_tokens: int | None = None,
+    conversation_history: list[dict] | None = None,
 ) -> str:
     """Compress chunks into final answer. Never raises — returns error message on failure."""
     max_tokens = max_tokens or settings.SUMMARISER_MAX_TOKENS
@@ -82,19 +106,30 @@ async def summarise_chunks(
         if calculation_result:
             user_msg += f"\n\nCalculation result: {calculation_result}"
 
+        # Build messages: system → optional history → current user message
+        messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+
+        if conversation_history:
+            trimmed = _trim_history(
+                conversation_history,
+                settings.CONVERSATION_MAX_HISTORY_MESSAGES,
+                settings.CONVERSATION_MAX_HISTORY_CHARS,
+            )
+            messages.extend(trimmed)
+
+        messages.append({"role": "user", "content": user_msg})
+
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         resp = await client.chat.completions.create(
             model=settings.SUMMARISER_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
+            messages=messages,
             temperature=0,
             max_completion_tokens=max_tokens,
         )
 
         answer = resp.choices[0].message.content.strip()
-        logger.info("Summarised %d chunks into %d-char answer", len(chunks), len(answer))
+        logger.info("Summarised %d chunks into %d-char answer (history=%d turns)",
+                     len(chunks), len(answer), len(conversation_history or []))
         return answer
 
     except Exception as exc:

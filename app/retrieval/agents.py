@@ -286,8 +286,10 @@ async def summariser_agent(state: dict) -> dict:
             chunks = chunks[:max_chunks]
 
         calc_result = state.get("calculation_result")
+        conversation_history = state.get("conversation_history", [])
 
-        answer = await _retry(summarise_chunks, query, chunks, graph_paths, calc_result)
+        answer = await _retry(summarise_chunks, query, chunks, graph_paths, calc_result,
+                              conversation_history=conversation_history)
 
         elapsed = time.monotonic() - t0
         return {
